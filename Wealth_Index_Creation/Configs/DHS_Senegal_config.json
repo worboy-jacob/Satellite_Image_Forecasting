@@ -1,0 +1,40 @@
+{
+  "data_path": {"Senegal":"data/Senegal_Data/SNHR8SFL.dta"},
+  "results_path":"data/Results/Test_Results",
+  "log_level":"DEBUG",
+  "columns_to_include":[
+    "hv001", "hv005", "hv009", "hv014", "hv025", "hv201", "hv202", "hv201b", "hv204", "hv205",
+    "hv206", "hv207", "hv208", "hv209", "hv210", "hv211", "hv212", "hv213", "hv214", "hv215",
+    "hv216", "hv217", "hv219", "hv220", "hv221", "hv222", "hv223", "hv225", "hv226", "hv227",
+    "hv228", "hv230a", "hv230b", "hv232", "hv232b", "hv232y", "hv234a", "hv235", "hv237",
+    "hv237a", "hv237b", "hv237c", "hv237d", "hv237e", "hv237f", "hv237x", "hv237z", "hv238",
+    "hv238a", "hv240", "hv241", "hv242", "hv243a", "hv243b", "hv243c", "hv243d", "hv243e",
+    "hv244", "hv245", "hv246", "hv246a", "hv246b", "hv246c", "hv246d", "hv246e", "hv246f",
+    "hv246g", "hv246h", "hv247", "hv252", "hv255", "hv256", "hv257", "hv259", "hv260",
+    "hv261", "hv262", "hv263", "hml1", "hml2", "sh101a", "sh134a", "sh134b", "sh134c",
+    "sh151aa", "sh151ab", "sh151ac", "sh151ad", "sh151ae", "sh151ax", "sh155a", "sh155b",
+    "sh161a", "sh162a", "sh163a", "sh161b", "sh162b", "sh163b", "sh161c", "sh162c", "sh163c",
+    "sh161d", "sh162d", "sh163d", "sh161e", "sh162e", "sh163e", "sh165", "sh166", "sh177a",
+    "sh177b", "sh177c", "sh177d", "sh177e", "sh177f", "sh177g", "sh177h", "sh177i", "sh177j",
+    "sh177k", "sh177l", "sh177x", "sh132d", "sh132e", "sh132h", "sh132j", "sh132k", "sh132l",
+    "sh132m", "sh132o", "sh132p", "sh133c", "sh133f", "sh133g", "sh133h"
+],
+  "na_columns":{
+    "sh155b": "sh155a",
+    "sh163a": "sh162a",
+    "sh163b": "sh162b",
+    "sh163d": "sh162d",
+    "sh163e": "sh162e"
+  },
+  "replace_val":{
+    "unknown": "NaN",
+    "none":0,
+    "95 or more":95,
+    "don't know":"NaN"
+  },
+  "k_values":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30],
+  "imputation":"KNN",
+  "n_simulations_FAMD": 10,
+  "print_loadings": true,
+  "display_scree_plot":true
+}
