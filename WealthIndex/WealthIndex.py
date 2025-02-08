@@ -392,7 +392,7 @@ class WealthIndexCalculator:
         )
         csv_file = "Wealth_Index_DF.csv"
         csv_file_path = os.path.join(repo_root, self.config["results_path"], csv_file)
-        self.data_processor.save_csv(df, csv_file_path)
+        self.data_processor.save_csv(merged_df, csv_file_path)
 
 
 if __name__ == "__WealthIndex__":
