@@ -14,8 +14,6 @@ import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning, module=".*", append=True)
 
-###Function for saving files
-
 
 ###Load Configuration
 class ConfigLoader:
@@ -83,16 +81,25 @@ class DataProcessor:
         logging.debug(f"Columns after dropping: {df.columns}")
         return df
 
+    ###Removing all columns that were removed from the processing of any dataframe for consistency
+    def handle_partially_missing_columns(self, dfs):
+        all_columns = [set(df.columns) for df in dfs.values()]
+        common_columns = set.intersection(*all_columns)
+        dfs_cleaned = {name: df[list(common_columns)] for name, df in dfs.items()}
+        return dfs_cleaned, common_columns
+
     ###Overall process_data
-    def process_data(self, df):
+    def process_data(self, dfs):
         logging.info("Processing data")
-        df = self.preprocess_data(df)
-        df = self.na_replace(df)
-        df = self.replace_val(df)
-        df = self.drop_less50(df)
+        for df in dfs:
+            df = self.preprocess_data(df)
+            df = self.na_replace(df)
+            df = self.replace_val(df)
+            df = self.drop_less50(df)
+        dfs, common_columns = self.handle_partially_missing_columns(dfs)
         logging.info("Data processing complete")
-        logging.debug(f"Columns after processing: {df.columns}")
-        return df
+        logging.debug(f"Columns after processing: {common_columns}")
+        return dfs
 
 
 ###Imputing using KNN
@@ -100,10 +107,13 @@ class KNN_Imputer:
     def __init__(self, config):
         self.config = config
 
+    ###FIXME: Need to remove certain columns (cluster ID and household weight for ex), from here maybe? Or is it worth keeping?
     ###Overall imputation
     def knn_imputations(self, df):
         start_time = time.time()
         logging.info("Imputing missing values using KNN")
+        dropped_columns = df[["hv000", "hv001", "hv005"]]
+        df = df.drop(columns=["hv000", "hv001", "hv005"])
         k_values = self.config.get("k_values")
         best_k_dict = self.best_ks(df, k_values)  ###Calculating best k_values
         df_imputed = df.copy()
@@ -143,6 +153,7 @@ class KNN_Imputer:
         logging.info(
             f"Imputation complete, remaining missing values: {df_imputed.isna().sum().sum()}"
         )
+        df_imputed[["hv000", "hv001", "hv005"]] = dropped_columns
         logging.debug(f"Columns after imputation: {df_imputed.columns}")
         logging.info(f"Time taken for imputation: {time.time() - start_time} seconds")
         return df_imputed
@@ -273,8 +284,8 @@ class FAMDAnalyzer:
         )
 
         ###Columns that will be needed but shouldn't be used for the FAMD
-        dropped_columns = df[["hv001", "hv005"]]
-        df = df.drop(columns=["hv001", "hv005"])
+        dropped_columns = df[["hv000", "hv001", "hv005"]]
+        df = df.drop(columns=["hv000", "hv001", "hv005"])
 
         ###Standardizing types
         for column in df.columns:
@@ -316,7 +327,7 @@ class FAMDAnalyzer:
             self.display_scree_plot(explained_variance)
         if print_loadings:
             self.print_loadings(famd)
-        df[["hv001", "hv005"]] = dropped_columns
+        df[["hv000", "hv001", "hv005"]] = dropped_columns
         df["wealth_index"] = wealth_index
         logging.info("Wealth Index calculation complete")
         logging.debug(f"Wealth index results: {df['wealth_index']}")
@@ -335,8 +346,7 @@ class WealthIndexCalculator:
     def calculate_wealth_index(self):
         ###main calculator function
         repo_root = os.path.dirname(os.path.abspath(__file__))
-        df = pd.DataFrame()
-
+        dfs = {}
         log_level = self.config.get("log_level", "INFO").upper()
         log_level = getattr(logging, log_level, logging.INFO)
         logging.basicConfig(
@@ -347,15 +357,35 @@ class WealthIndexCalculator:
                 logging.StreamHandler(),
             ],
         )
-        for key, value in self.config["data_path"].items():
-            file_path = os.path.join(repo_root, value)
-            original_df = self.data_processor.load_data(file_path)
-            df = pd.concat([df, original_df], axis=0, ignore_index=True)
-        df = self.data_processor.process_data(df)
-        if self.config["imputation"] == "KNN":
-            df = self.imputer.knn_imputations(df)
-        df = self.famd_analyzer.FAMD_calc(
-            df,
+        for country, years in self.config["country_year"].items():
+            for year in years:
+                file_path = os.path.join(repo_root, "data", "DHS", country, year)
+                file_name = next(
+                    (f for f in os.listdir(file_path) if f.endswith(".DTA")), None
+                )
+                if file_name:
+                    dfs[f"{country}_{year}"] = pd.read_stata(
+                        os.path.join(file_path, file_name)
+                    )
+                else:
+                    logging.info(f"Could not find {country} {year} data.")
+
+        dfs = self.data_processor.process_data(dfs)
+
+        for df in dfs:
+            if self.config["imputation"] == "KNN":
+                df = self.imputer.knn_imputations(df)
+        check = 0
+        for name, df in dfs.items():
+            if df.isna().sum().sum() > 0:  # Check if the DataFrame has any NaN values
+                logging.info(f"Missing data found in {name}:")
+                check += 1
+            if check != 0:
+                logging.info("Missing data found, exiting.")
+                exit()
+        merged_df = pd.concat(dfs.values(), axis=0, ignore_index=True)
+        merged_df = self.famd_analyzer.FAMD_calc(
+            merged_df,
             self.config["n_simulations"],
             self.config["print_loadings"],
             self.config["display_scree_plot"],
