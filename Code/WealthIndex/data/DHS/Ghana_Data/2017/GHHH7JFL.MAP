@@ -1,0 +1,625 @@
+                                                   GHHH7JFL                                                   
+                                                GHHH7JFL_DICT                                                 
+
+                                        GHHH7JFL.DCF                                                          
+                                    Last Modified:  5/17/2019  8:48:20 AM                                     
+
+--------------------------------------------------------------------------------------------------------------
+Level Name                    Level Label                                                  Type            Rec
+  Record Name                   Record Label                                              Value  Req  Max  Len
+--------------------------------------------------------------------------------------------------------------
+HOUSEHOLD                     Household                                                                       
+  RECORD1                       RECORD1                                                          Yes    1  170
+Level: Household                                       Record: RECORD1
+--------------------------------------------------------------------------------------------------------------
+                                                                                 Data Item            Dec Zero
+Item Name              Item Label                                     Start  Len Type Type  Occ  Dec Char Fill
+--------------------------------------------------------------------------------------------------------------
+QHCLUST           (id) Cluster number                                     1    4    N    I    1    0   No  Yes
+                               1:900  
+QHNUMBER          (id) Household number                                   5    4    N    I    1    0   No  Yes
+                         (record type)                                    0    0   AN    I    1    0   No   No
+QHREGION               Region                                             9    2    N    I    1    0   No   No
+                               1   Western
+                               2   Central
+                               3   Greater accra
+                               4   Volta
+                               5   Eastern
+                               6   Ashanti
+                               7   Brong ahafo
+                               8   Northern
+                               9   Upper east
+                               10  Upper west
+QHDISTR                District                                          11    4    N    I    1    0   No   No
+                               101   Jomoro
+                               102   Ellembelle
+                               104   Ahanta West
+                               105   Sekondi Takoradi Metropolis
+                               106   Shama
+                               107   Wassa East
+                               108   Tarkwa Nsuaem Municipal
+                               109   Prestea/Huni Valley
+                               110   Wassa Amenfi East
+                               111   Wassa Amenfi West
+                               112   Aowin
+                               113   Sefwi Akontombra
+                               114   Sefwi Wiawso
+                               115   Sefwi Bibiani-Ahwiaso Bekwai
+                               116   Juabeso
+                               117   Bia west
+                               118   Mpohor
+                               119   Wassa Amenfi Central
+                               120   Suaman
+                               121   Bodi
+                               122   Bia East
+                               201   Komenda-Edina-Egyafo-Abirem Municipal
+                               202   Cape Coast Metropolis
+                               203   Abura-Asebu-Kwamankese
+                               204   Mfantsiman
+                               205   Ajumako-Enyan-Essiam
+                               206   Gomoa West
+                               207   Effutu Municipal
+                               208   Gomoa East
+                               209   Ewutu Senya
+                               210   Agona East
+                               211   Agona West Municipal
+                               212   Asikuma-Odoben Brakwa
+                               213   Assin South
+                               214   Assin North Municipal
+                               215   TwifoAti Morkwa
+                               216   Upper Denkyira East Municipal
+                               217   Upper Denkyira West
+                               218   Twifo Heman Lower Denkyira
+                               219   Ekumfi
+                               220   Awutu Senya East Municipal
+                               301   Ga South Municipal
+                               302   Ga West Municipal
+                               303   Ga East Municipal
+                               304   Accra Metropolis
+                               305   Adenta Municipal
+                               306   Ledzokuku/Krowor Municipal
+                               307   Ashaiman Municipal
+                               308   Tema Metropolis
+                               309   Shai Osudoku
+                               310   Ada East
+                               311   Ga Central Municipal
+                               312   La Dade Kotopon Municipal
+                               313   La Nkwantanang Madina Municipal
+                               314   Kpone Katamanso
+                               315   Ningo Prampram
+                               316   Ada West
+                               401   South Tongu
+                               402   Keta Municapal
+                               403   Ketu South
+                               404   Ketu North
+                               405   Akatsi
+                               406   Central Tongu
+                               407   Adaklu
+                               408   Ho Municipal
+                               409   South Dayi
+                               410   Kpando Municipal
+                               411   Hohoe Municipal
+                               412   Biakoye
+                               413   Jasikan
+                               414   Kadjebi
+                               415   Krachi East
+                               417   Nkwanta South
+                               418   Nkwanta North
+                               419   North Tongu
+                               420   Akatsi North
+                               421   Agotime Ziope
+                               422   Ho West
+                               423   Afadzato South
+                               424   North Dayi
+                               425   Krachi Nchumuru
+                               501   Birim South
+                               502   Birim Municipal
+                               503   West Akim Municipal
+                               504   Suhum Municipal
+                               505   Nsawam Adoagyiri Municipal
+                               506   Akwapem North
+                               507   New Juaben Municipal
+                               508   Yilo Krobo
+                               509   Lower Manya
+                               510   Asuogyaman
+                               511   Upper Manya
+                               512   Fanteakwa
+                               513   East Akim Municipal
+                               514   Kwaebibirem
+                               515   Akyem Mansa
+                               516   Birim North
+                               517   Atiwa
+                               518   Kwahu West Municipal
+                               519   Kwahu South
+                               520   Kwahu East
+                               521   Kwahu Afram Plains North
+                               522   Upper West Akyem
+                               523   Akwapim South
+                               524   Ayensuano
+                               525   Denkyembuor
+                               526   Kwahu Afram Plains South
+                               601   Atwima Mponua
+                               602   Amansie West
+                               603   Amansie Central
+                               604   Adansi South
+                               605   Obuasi Municipal
+                               606   Adansi North
+                               607   Bekwai Municipal
+                               608   Bosome Freho
+                               609   Asante Akim South
+                               610   Asante Akim Central Municipal
+                               611   Ejisu Juaben Municipal
+                               612   Bosumtwi
+                               613   Atwima Kwanwoma
+                               614   Kumasi Metropolis
+                               615   Atwima Nwabiagya
+                               616   Ahafo Ano South
+                               617   Ahafo Ano North
+                               618   Offinso Municipal
+                               619   Afigya Kwabre
+                               620   Kwabre East
+                               621   Afigya Sekyere
+                               622   Mampong Municipal
+                               623   Sekyere East
+                               624   Sekyere Afram Plains
+                               625   Sekyere Central
+                               626   Ejura Sekye Dumasi
+                               627   Offinso North
+                               628   Asokore Mampong Municipal
+                               629   Asante Akim North
+                               630   Sekyere Afram Plains North
+                               701   Asunafo South
+                               702   Asunafo North Municipal
+                               703   Asutifi North
+                               704   Dormaa Municipal
+                               705   Dormaa Central Municipal
+                               706   Tano South
+                               707   Tano North
+                               708   Sunyani Municipal
+                               709   Sunyani West
+                               710   Berekum Municipal
+                               711   Jaman South
+                               712   Jaman North
+                               713   Tain
+                               714   Wenchi Municipal
+                               715   Techiman Municipal
+                               716   Nkoranza South
+                               717   Nkoranza North
+                               718   Atebubu Amantin
+                               719   Sene West
+                               720   Pru
+                               721   Kintampo South
+                               722   Kintampo North Municipal
+                               723   Asutifi South
+                               724   Dormaa West
+                               725   Techiman North
+                               727   Sene East
+                               801   Bole
+                               802   Sawla-Tuna-Kalba
+                               803   West Gonja
+                               804   Gonja Central
+                               805   East Gonja
+                               806   Kpandai
+                               807   Nanumba South
+                               808   Nanumba North
+                               809   Zabzugu
+                               810   Yendi Municipal
+                               811   Tamale Metropolis
+                               812   Tolon
+                               813   Savelugu Nanton
+                               814   Karaga
+                               815   Gushiegu
+                               816   Saboba
+                               817   Chereponi
+                               818   Bunkpurugu Yonyo
+                               819   Mamprusi East
+                               820   Mamprusi West
+                               821   North Gonja
+                               822   Kumbumgu
+                               823   Sagnerigu Municipal
+                               824   Mion
+                               825   Tatale
+                               826   Mamprugu Moagduri
+                               901   Builsa North
+                               902   Kasena Nankana West
+                               903   Kasena Nankana East
+                               904   Bolgatanga Municipal
+                               905   Talensi
+                               906   Bongo
+                               907   Bawku West
+                               908   Garu Tempane
+                               909   Bawku Municipal
+                               910   Builsa South
+                               911   Nabdam
+                               912   Binduri
+                               913   Pusiga
+                               1001  Wa West
+                               1002  Wa Municipal
+                               1003  Wa East
+                               1004  Sissala East
+                               1005  Nadowli-Kaleo
+                               1006  Jirapa
+                               1007  Sissala West
+                               1008  Lambussie Karni
+                               1009  Lawra
+                               1010  Daffiama Bussie
+                               1011  Nandom
+QHINTD                 Interview day                                     15    2    N    I    1    0   No   No
+                               1:31  
+QHINTM                 Interview month                                   17    2    N    I    1    0   No   No
+                               1:12  
+QHINTY                 Interview year                                    19    4    N    I    1    0   No   No
+                               2017  
+QHINTNUM               Interviewer number                                23    4    N    I    1    0   No   No
+QHRESULT               Result of household interview                     27    1    N    I    1    0   No   No
+                               1  Completed
+                               2  No household member at home or no competent respondent at home at time of vi
+                               3  Entire household absent for extended period of time
+                               4  Postponed
+                               5  Refused
+                               6  Dwelling vacant or address not a dwelling
+                               7  Dwelling destroyed
+                               8  Dwelling not found
+                               9  Other
+QHVISITS               Number of household visits                        28    1    N    I    1    0   No   No
+                               1:5  
+QHCONSENT              Consent agreement                                 29    1    N    I    1    0   No   No
+                               1  Respondent agrees to be interviewed
+                               2  Respondent does not agree to be interviewed
+QHMEMBER               Total members in household                        30    2    N    I    1    0   No   No
+                               1:50  
+QHWOMEN                Eligible women in household                       32    2    N    I    1    0   No   No
+                               0:15  
+QHRESP                 Line of household respondent                      34    2    N    I    1    0   No   No
+                               1:50  
+QHSUPERV               Supervisor number                                 36    4    N    I    1    0   No   No
+QHLANGQ                Language of questionnaire                         40    2    N    I    1    0   No   No
+                               0  English
+                               1  Akan
+                               2  Ga
+                               3  Ewe
+QHLANGI                Language of interview                             42    2    N    I    1    0   No   No
+                               0   English
+                               1   Akan
+                               2   Ga
+                               3   Ewe
+                               4   Guan
+                               5   Mole-dagbani
+                               6   Grusi
+                               7   Gurma
+                               8   Mande
+                               96  Other
+QHLANGR                Language of respondent                            44    2    N    I    1    0   No   No
+                               0   English
+                               1   Akan
+                               2   Ga
+                               3   Ewe
+                               4   Guan
+                               5   Mole-dagbani
+                               6   Grusi
+                               7   Gurma
+                               8   Mande
+                               96  Other
+QHTRANS                Translator used                                   46    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH100H                 Hour interview begins                             47    2    N    I    1    0   No   No
+                               0:23  
+QH100M                 Minutes interview begins                          49    2    N    I    1    0   No   No
+                               0:59  
+QHBABIES               Babies in the household                           51    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QHNOFAM                Other non-family members in household             52    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QHTEMP                 Other temporal visitors in household              53    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QHINTC                 Date of household interview (CMC)                 54    4    N    I    1    0   No   No
+                          (na)       Not applicable
+QHINTCD                Date of household interview Century Day Code (C   58    5    N    I    1    0   No   No
+                          (na)        Not applicable
+QHWEIGHT               Household weight (6 decimals)                     63    8    N    I    1    0   No   No
+QHSTRATA               Sampling errors stratum                           71    4    N    I    1    0   No   No
+                               1   Central-Urban
+                               2   Central-Rural
+                               3   Greater Accra-Urban
+                               4   Greater Accra-Rural
+                               5   Volta-Urban
+                               6   Volta-Rural
+                               7   Western-Urban
+                               8   Western-Rural
+                               9   Ashanti-Urban
+                               10  Ashanti-Rural
+                               11  Brong Ahafo-Urban
+                               12  Brong Ahafo-Rural
+                               13  Eastern-Urban
+                               14  Eastern-Rural
+                               15  Northern-Urban
+                               16  Northern-Rural
+                               17  Upper East-Urban
+                               18  Upper East-Rural
+                               19  Upper West-Urban
+                               20  Upper West-Rural
+QHWLTHF                Wealth index factor (5 decimals)                  75    8    N    I    1    0   No   No
+QHWLTHI                Wealth index quintile                             83    1    N    I    1    0   No   No
+                               1  Lowest
+                               2  Second
+                               3  Middle
+                               4  Fourth
+                               5  Highest
+QHTYPE                 Type of place of residence                        84    1    N    I    1    0   No   No
+                               1  Urban
+                               2  Rural
+QHWLTFUR               Wealth index factor for urban/rural (5 decimals   85    8    N    I    1    0   No   No
+                          (na)           Not applicable
+QHWLTIUR               Wealth index quintile for urban/rural             93    1    N    I    1    0   No   No
+                               1  Lowest
+                               2  Second
+                               3  Middle
+                               4  Fourth
+                               5  Highest
+QH101                  Source of drinking water                          94    2    N    I    1    0   No   No
+                               11  Piped into dwelling
+                               12  Piped to yard/plot
+                               13  Piped to neighbor
+                               14  Public tap/standpipe
+                               21  Tube well or borehole
+                               31  Protected well
+                               32  Unprotected well
+                               41  Protected spring
+                               42  Unprotected spring
+                               51  Rainwater
+                               61  Tanker truck
+                               71  Cart with small tank
+                               81  Surface water (river/dam/lake/pond/stream/canal/irrigation channel)
+                               91  Bottled water
+                               92  Sachet water
+                               96  Other
+QH102                  Source of water for cooking/handwashing           96    2    N    I    1    0   No   No
+                               11  Piped into dwelling
+                               12  Piped to yard/plot
+                               13  Piped to neighbor
+                               14  Public tap/standpipe
+                               21  Tube well or borehole
+                               31  Protected well
+                               32  Unprotected well
+                               41  Protected spring
+                               42  Unprotected spring
+                               51  Rainwater
+                               61  Tanker truck
+                               71  Cart with small tank
+                               81  Surface water (river/dam/lake/pond/stream/canal/irrigation channel)
+                               96  Other
+                           (m) 99  Missing
+QH103                  Location of source for water                      98    1    N    I    1    0   No   No
+                               1  In own dwelling
+                               2  In own yard/plot
+                               3  Elsewhere
+QH104                  Time to water and back (mins)                     99    3    N    I    1    0   No   No
+                               0:900  Minutes
+                               998    Don't know
+QH105                  Type of toilet facility                          102    2    N    I    1    0   No   No
+                               11  Flush to piped sewer system
+                               12  Flush to manhole/septic tank
+                               13  Flush to pit latrine
+                               14  Flush to somewhere else
+                               15  Flush, don't know where
+                               21  Ventilated improved pit latrine
+                               22  Pit latrine with slab
+                               23  Pit latrine without slab/open pit
+                               31  Composting toilet
+                               41  Bucket toilet
+                               51  Hanging toilet/hanging latrine
+                               61  No facility/bush/field
+                               96  Other
+QH106                  Share facilities with other households           104    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH107                  Number of households sharing toilet              105    2    N    I    1    0   No   No
+                               2:9  
+                               95   10 or more households
+                               98   Don't know
+QH108                  Type of cooking fuel                             107    2    N    I    1    0   No   No
+                               1   Electricity
+                               2   Lpg
+                               3   Natural gas
+                               4   Biogas
+                               5   Kerosene
+                               6   Coal, lignite
+                               7   Charcoal
+                               8   Wood
+                               9   Straw/shrubs/grass
+                               10  Agricultural crop residue
+                               11  Animal dung
+                               95  No food cooked in household
+                               96  Other
+QH109                  Number of rooms used for sleeping                109    2    N    I    1    0   No   No
+                               1:24  
+QH110                  Livestock, herds or farm animals                 111    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH111A                 Milk cows                                        112    2    N    I    1    0   No   No
+                               0     None
+                               1:94  
+                               95    95 or more
+                               98    Unknown
+QH111B                 Other cattle                                     114    2    N    I    1    0   No   No
+                               0     None
+                               1:94  
+                               95    95 or more
+                               98    Unknown
+QH111C                 Horses/donkeys/mules                             116    2    N    I    1    0   No   No
+                               0     None
+                               1:94  
+                               95    95 or more
+                               98    Unknown
+QH111D                 Goats                                            118    2    N    I    1    0   No   No
+                               0     None
+                               1:94  
+                               95    95 or more
+                               98    Unknown
+QH111E                 Sheep                                            120    2    N    I    1    0   No   No
+                               0     None
+                               1:94  
+                               95    95 or more
+                               98    Unknown
+QH111F                 Chickens or other poultry                        122    2    N    I    1    0   No   No
+                               0     None
+                               1:94  
+                               95    95 or more
+                               98    Unknown
+QH111G                 Pigs                                             124    2    N    I    1    0   No   No
+                               0     None
+                               1:94  
+                               95    95 or more
+                               98    Unknown
+QH111H                 Rabbits                                          126    2    N    I    1    0   No   No
+                               0     None
+                               1:94  
+                               95    95 or more
+                               98    Unknown
+QH111I                 Grasscutter                                      128    2    N    I    1    0   No   No
+                               0     None
+                               1:94  
+                               95    95 or more
+                               98    Unknown
+QH112                  Own land usable for agriculture                  130    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH113U                 Area for agricultural land (unit)                131    1    N    I    1    0   No  Yes
+                               1  Hectares
+                               2  Acres
+                               3  Plots
+                               4  Poles
+                               9  Special answers
+QH113N                 Area for agricultural land (number)              132    4    N    I    1    1  Yes  Yes
+                               0.1:94.9  
+                               95.0      95 or more hectares
+                               99.8      Don't know
+QH114A                 Electricity                                      136    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH114B                 Radio                                            137    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH114C                 Television                                       138    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH114D                 Telephone (non-mobile)                           139    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH114E                 Computer                                         140    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH114F                 Refrigerator                                     141    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH114G                 Freezer                                          142    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH114H                 Generator                                        143    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH114I                 Washing machine                                  144    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH114J                 Camera                                           145    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH114K                 Video/dvd/vcd                                    146    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH114L                 Sewing machine                                   147    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH114M                 Bed                                              148    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH114N                 Table                                            149    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH114O                 Chair                                            150    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH114P                 Cabinet                                          151    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH115A                 Wrist watch                                      152    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH115B                 Mobile telephone                                 153    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH115C                 Bicycle                                          154    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH115D                 Motorcycle or scooter                            155    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH115E                 Animal-drawn cart                                156    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH115F                 Car, Bus or Truck                                157    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH115G                 Boat with a motor                                158    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH115H                 Boat without a motor                             159    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH116                  Bank account                                     160    1    N    I    1    0   No   No
+                               1  Yes
+                               2  No
+QH117                  Main floor material                              161    2    N    I    1    0   No   No
+                               11  Natural: Earth/sand
+                               12  Natural: Dung
+                               21  Rudimentary: Wood planks
+                               22  Rudimentary: Palm/bamboo
+                               31  Finished: Parquet or polished wood
+                               32  Finished: Vinyl or asphalt strips
+                               33  Finished: Ceramic/marble/porcelain/tiles/terrazo
+                               34  Finished: Cement
+                               35  Finished: Woolen carpet/synthetic  carpet
+                               36  Finished: Linoleum/rubber carpet
+                               96  Other
+QH118                  Main roof material                               163    2    N    I    1    0   No   No
+                               11  Natural: Thatch/palm leaf
+                               12  Natural: Mud/sod
+                               21  Rudimentary: Rustic mat
+                               22  Rudimentary: Palm/bamboo
+                               23  Rudimentary: Wood planks
+                               24  Rudimentary: Cardboard
+                               31  Finished: Zinc/aluminium
+                               32  Finished: Wood
+                               33  Finished: Calamine/cement fiber
+                               34  Finished: Ceramic/brick tiles
+                               35  Finished: Cement
+                               36  Finished: Roofing shingles
+                               37  Finished: Asbestos/slate roofing sheets
+                               96  Other
+QH119                  Main wall material                               165    2    N    I    1    0   No   No
+                               11  Natural: Cane/palm/trunks
+                               12  Natural: Mud/landcrete
+                               21  Rudimentary: Bamboo with mud
+                               22  Rudimentary: Stone with mud
+                               23  Rudimentary: Uncovered adobe
+                               24  Rudimentary: Plywood
+                               25  Rudimentary: Cardboard
+                               26  Rudimentary: Reused wood
+                               31  Finished: Cement
+                               32  Finished: Stone with lime/cement
+                               33  Finished: Bricks
+                               34  Finished: Cement blocks
+                               35  Finished: Covered adobe
+                               36  Finished: Wood planks/shingles
+                               96  Other
+QH120H                 End of household interview (hour)                167    2    N    I    1    0   No  Yes
+                               0:23  
+QH120M                 End of household interview (minutes)             169    2    N    I    1    0   No  Yes
+                               0:59  
+--------------------------------------------------------------------------------------------------------------
+Relation Name         Primary               Linked by             Secondary             Linked by
+--------------------------------------------------------------------------------------------------------------

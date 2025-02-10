@@ -1,0 +1,152 @@
+# Output configuration
+results_path: "data/Results/Test_Results/WealthIndex"
+log_level: "DEBUG"
+
+# Data sources configuration
+country_year:
+  Senegal: 
+    - "2023"
+    - "2019"
+    - "2018"
+    - "2017"
+    - "2016"
+    - "2015"
+  Ghana:
+    - "2022"
+
+# Data processing configuration
+columns_to_include:
+  # Household identification and basic characteristics
+  - "hv000"  # Country code
+  - "hv001"  # Cluster number
+  - "hv005"  # Household sample weight
+  - "hv009"  # Number of household members
+  - "hv014"  # Number of children 5 and under
+  - "hv025"  # Urban/rural status
+  
+  # Water and sanitation
+  - "hv201"  # Source of drinking water
+  - "hv202"  # Source of non-drinking water
+  - "hv204"  # Time to get to water source
+  - "hv205"  # Type of toilet facility
+  
+  # Household characteristics and assets
+  - "hv206"  # Has electricity
+  - "hv207"  # Has radio
+  - "hv208"  # Has television
+  - "hv209"  # Has refrigerator
+  - "hv210"  # Has bicycle
+  - "hv211"  # Has motorcycle/scooter
+  - "hv212"  # Has car/truck
+  - "hv213"  # Main floor material
+  - "hv214"  # Main wall material
+  - "hv215"  # Main roof material
+  - "hv216"  # Number of rooms
+  - "hv217"  # Relationship structure
+  - "hv219"  # Sex of head of household
+  - "hv220"  # Age of head of household
+  - "hv221"  # Has telephone
+  
+  # Additional household assets and characteristics
+  - "hv225"
+  - "hv226"
+  - "hv227"
+  - "hv228"
+  - "hv230a"
+  - "hv230b"
+  - "hv232"
+  - "hv232b"
+  - "hv232y"
+  - "hv234a"
+  - "hv235"
+  
+  # Additional household characteristics
+  - "hv237"
+  - "hv237a"
+  - "hv237b"
+  - "hv237c"
+  - "hv237d"
+  - "hv237e"
+  - "hv237f"
+  - "hv237x"
+  - "hv237z"
+  
+  # More household characteristics
+  - "hv238"
+  - "hv240"
+  - "hv241"
+  - "hv242"
+  
+  # Additional variables
+  - "hv243a"
+  - "hv243b"
+  - "hv243c"
+  - "hv243d"
+  - "hv244"
+  - "hv245"
+  - "hv246"
+  - "hv246a"
+  - "hv246b"
+  - "hv246c"
+  - "hv246d"
+  - "hv246e"
+  - "hv246f"
+  - "hv246g"
+  - "hv246h"
+  - "hv247"
+  - "hml1"
+  - "hml2"
+
+# NA handling configuration
+na_columns:
+  sh155b: "sh155a"
+  sh163a: "sh162a"
+  sh163b: "sh162b"
+  sh163d: "sh162d"
+  sh163e: "sh162e"
+
+# Value replacement configuration
+replace_val:
+  unknown: "NaN"
+  none: 0
+  "95 or more": 95
+  "don't know": "NaN"
+
+# Analysis configuration
+imputation: "KNN"
+k_values: &k_values
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 20
+  - 21
+  - 22
+  - 23
+  - 24
+  - 25
+  - 26
+  - 27
+  - 28
+  - 29
+  - 30
+
+# FAMD analysis configuration
+n_simulations_FAMD: 10
+print_loadings: true
+display_scree_plot: true
