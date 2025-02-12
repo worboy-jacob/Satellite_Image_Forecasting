@@ -97,20 +97,14 @@ columns_to_include:
   - "hml1"
   - "hml2"
 
-# NA handling configuration
-na_columns:
-  sh155b: "sh155a"
-  sh163a: "sh162a"
-  sh163b: "sh162b"
-  sh163d: "sh162d"
-  sh163e: "sh162e"
-
 # Value replacement configuration
 replace_val:
   unknown: "NaN"
   none: 0
   "95 or more": 95
   "don't know": "NaN"
+
+missing_threshold: 0.5
 
 # Analysis configuration
 imputation: "KNN"
