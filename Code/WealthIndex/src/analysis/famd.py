@@ -6,6 +6,8 @@ import logging
 import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import Tuple
+from pathlib import Path
+from src.utils.paths import get_results_dir
 
 logger = logging.getLogger("wealth_index.famd")
 
@@ -27,7 +29,9 @@ class FAMDAnalyzer:
         simulated_eigenvalues = np.zeros((n_simulations, n_features))
 
         for i in range(n_simulations):
-            print(f"running simulation {i+1} of {n_simulations}")
+            print(
+                f"running simulation {i+1} of {n_simulations}"
+            )  ###TODO: change to log
             # Create random dataset with same structure
             random_df = df.copy()
             for col in df.columns:
@@ -46,6 +50,7 @@ class FAMDAnalyzer:
         percentile_95 = np.percentile(simulated_eigenvalues, 95, axis=0)
 
         # Keep components where real eigenvalues > 95th percentile
+        ###TODO: double check that this formula works
         significant_components = [
             i
             for i, (real, simulated) in enumerate(zip(real_eigenvalues, percentile_95))
@@ -69,7 +74,9 @@ class FAMDAnalyzer:
         plt.xlabel("Components")
         plt.ylabel("Variables")
         plt.tight_layout()
-        plt.savefig("famd_contributions.png")
+        output_dir = get_results_dir()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        plt.savefig(output_dir / "famd_contributions.png")
         plt.close()
 
     def calculate_wealth_index(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -78,7 +85,7 @@ class FAMDAnalyzer:
 
         # Prepare data
         df_processed = df.copy()
-        id_cols = ["hv000", "hv001", "hv005"]
+        id_cols = ["hv000", "hv001", "hv005", "hv007"]
         df_ids = df_processed[id_cols]
         df_processed = df_processed.drop(columns=id_cols)
 
@@ -94,7 +101,7 @@ class FAMDAnalyzer:
 
         # Determine components to use
         if self.config.get("run_parallel_analysis", False):
-            n_simulations = self.config.get("n_simulations", 100)
+            n_simulations = self.config.get("n_simulations", 1000)
             components = self._run_parallel_analysis(famd, df_processed, n_simulations)
             logger.info(f"Parallel analysis selected {len(components)} components")
         else:
@@ -121,6 +128,6 @@ class FAMDAnalyzer:
         # Create result DataFrame
         result = pd.concat(
             [df_ids, pd.Series(wealth_index, name="wealth_index")], axis=1
-        )
+        )  ###TODO: Normalize from 0 to 1
 
         return result

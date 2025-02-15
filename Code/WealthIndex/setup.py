@@ -13,5 +13,6 @@ setup(
         "pyyaml",
         "matplotlib",
         "tqdm",
+        "pyarrow",
     ],
 )

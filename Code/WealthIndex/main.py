@@ -6,8 +6,9 @@ import pandas as pd
 import logging
 import time
 
-# Add project root to Python path
-project_root = Path(__file__).resolve().parent
+from src.utils.paths import get_project_root, get_logs_dir, get_configs_dir
+
+project_root = get_project_root()
 sys.path.insert(0, str(project_root))
 
 # Local imports
@@ -27,8 +28,13 @@ def create_directory_structure():
 
 def validate_data_structure():
     """Validate that required data directories and files exist."""
-    required_paths = ["config/config.yaml", "data/DHS"]
+    from src.utils.paths import get_dhs_dir
 
+    required_paths = [
+        str(get_configs_dir() / "config.yaml"),
+        str(get_dhs_dir() / "Ghana_Data"),  ###TODO: make this automatic
+        str(get_dhs_dir() / "Senegal_Data"),
+    ]
     missing_paths = []
     for path in required_paths:
         if not (project_root / path).exists():
@@ -47,11 +53,11 @@ def main():
         validate_data_structure()
 
         # Initialize logging
-        logger = setup_logging()
+        logger = setup_logging()  ###TODO: add level from config
         logger.info("Starting wealth index calculation")
 
         # Load configuration
-        config_path = project_root / "config" / "config.yaml"
+        config_path = get_configs_dir() / "config.yaml"
         config = Config(config_path).config
 
         # Initialize processors
@@ -85,9 +91,10 @@ def main():
         result_df = analyzer.calculate_wealth_index(merged_df)
 
         # Save results
-        output_path = project_root / config["results_path"] / "wealth_index.csv"
+        output_path = project_root / config["results_path"] / "wealth_index"
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        result_df.to_csv(output_path, index=False)
+        result_df.to_parquet(output_path.with_suffix(".parquet"), engine="pyarrow")
+        result_df.to_csv(output_path.with_suffix(".csv"), index=False)
 
         execution_time = time.time() - start_time
         logger.info(f"Processing completed in {execution_time:.2f} seconds")

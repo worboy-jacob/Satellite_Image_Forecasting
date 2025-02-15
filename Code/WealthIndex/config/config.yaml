@@ -20,6 +20,7 @@ columns_to_include:
   - "hv000"  # Country code
   - "hv001"  # Cluster number
   - "hv005"  # Household sample weight
+  - "hv007"  # Year of interview
   - "hv009"  # Number of household members
   - "hv014"  # Number of children 5 and under
   - "hv025"  # Urban/rural status

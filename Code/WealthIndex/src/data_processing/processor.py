@@ -168,8 +168,9 @@ class DataProcessor:
         Returns dict of processed DataFrames.
         """
         dfs = {}
-        project_root = Path(__file__).parent.parent.parent
+        from src.utils.paths import get_project_root
 
+        project_root = get_project_root()
         for country, years in self.config["country_year"].items():
             country = f"{country}_Data"
             years = [years] if isinstance(years, str) else years
