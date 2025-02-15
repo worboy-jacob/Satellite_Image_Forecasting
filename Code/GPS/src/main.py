@@ -1,3 +1,5 @@
+###TODO: better commenting and decorators
+
 from pathlib import Path
 import logging
 from typing import Dict, Any, List, Tuple
