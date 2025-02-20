@@ -1,10 +1,16 @@
 # wealth_index/data_processing/imputer.py
 import pandas as pd
 import numpy as np
+from sklearn.model_selection import cross_val_score, RandomizedSearchCV
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import OneHotEncoder
 import logging
 from typing import Dict, Any, Tuple, List
+from scipy.stats import randint, uniform
+from tqdm import tqdm
+
+###TODO: Change this to implement MissForest and MICE, then to go through all 3 and pick the best one
+###TODO: make sure to add hyperparameter optimization above
 
 logger = logging.getLogger("wealth_index.imputer")
 
@@ -12,7 +18,7 @@ logger = logging.getLogger("wealth_index.imputer")
 class KNNImputer:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.k = self.config.get("k_values", [5])[0]
+        self.verbose = config.get("verbose", 0)
 
     def determine_column_type(self, series: pd.Series) -> str:
         """
@@ -141,12 +147,8 @@ class KNNImputer:
         logger.info(f"Found {len(columns_with_na)} columns with missing values")
 
         for column in columns_with_na:
-            try:
-                df_imputed[column] = self._impute_column(df_imputed, column)
-                logger.info(f"Successfully imputed column: {column}")
-            except Exception as e:
-                logger.error(f"Error imputing column {column}: {e}")
-                continue
+            df_imputed[column] = self._impute_column(df_imputed, column)
+            logger.info(f"Successfully imputed column: {column}")
 
         df_imputed = self._finalize_column_types(df_imputed)
         return df_imputed
@@ -160,20 +162,192 @@ class KNNImputer:
         # Convert to string while properly handling categorical data
         features_processed = features.copy()
         for col in features.columns:
-            if pd.api.types.is_categorical_dtype(features[col]):
-                mask = features[col].isna()
-                temp_series = features[col].astype(str)
-                temp_series[mask] = "MISSING_VALUE"
-                features_processed[col] = temp_series
+            col_type = self.determine_column_type(features[col])
+            if col_type == "numeric":
+                median_value = pd.to_numeric(features[col], errors="coerce").median()
+                features_processed[col] = pd.to_numeric(
+                    features[col], errors="coerce"
+                ).fillna(median_value)
             else:
-                features_processed[col] = (
-                    features[col].fillna("MISSING_VALUE").astype(str)
-                )
-
+                mode_value = features[col].mode().iloc[0]
+                features_processed[col] = features[col].fillna(mode_value).astype(str)
         encoder = OneHotEncoder(
             sparse_output=False, handle_unknown="ignore", dtype=np.float32
         )
         return encoder.fit_transform(features_processed)
+
+    def _get_parameter_space(
+        self, X_train: np.ndarray, y_train: pd.Series, col_type: str
+    ) -> Dict[str, Any]:
+        """
+        Define parameter space for randomized search based on data characteristics.
+        """
+        n_samples = len(y_train)
+        # Calculate k range
+        min_k = 3
+        max_k = min(int(np.sqrt(n_samples)), 15, n_samples // 4)
+
+        if n_samples < 100:
+            leaf_range = (10, 20)
+        else:
+            leaf_range = (20, 30)
+        # Base parameter space
+        param_space = {
+            "n_neighbors": randint(min_k, max_k + 1),
+            "weights": ["uniform", "distance"],
+            "leaf_size": randint(*leaf_range),
+        }
+
+        # Metric space based on column type
+        if col_type == "numeric":
+            param_space.update(
+                {
+                    "metric": ["minkowski", "euclidean", "manhattan", "cosine"],
+                    "p": randint(1, 3),  # 1 for manhattan, 2 for euclidean
+                }
+            )
+        else:
+            param_space.update(
+                {"metric": ["hamming"], "p": [2]}  # Fixed for categorical data
+            )
+
+        return param_space
+
+    def _simple_parameter_search(
+        self, X_train: np.ndarray, y_train: pd.Series, param_space: Dict
+    ) -> Dict[str, Any]:
+        """
+        Simple parameter search for cases with severe class imbalance.
+        """
+        from sklearn.model_selection import train_test_split
+
+        # Split data with stratification if possible
+        try:
+            X_t, X_v, y_t, y_v = train_test_split(
+                X_train,
+                y_train,
+                test_size=0.2,
+                stratify=y_train if len(np.unique(y_train)) > 1 else None,
+            )
+        except ValueError:
+            # If stratification fails, do regular split
+            X_t, X_v, y_t, y_v = train_test_split(X_train, y_train, test_size=0.2)
+
+        best_score = float("-inf")
+        best_params = None
+        no_improvement_count = 0
+        max_no_improvement = 5
+        n_iter = max(5, min(10, len(y_train) // 10)) * 2
+        pbar = tqdm(
+            range(n_iter),
+            desc="Parameter search",
+            unit="trial",
+            ncols=80,  # Fixed width
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
+        )
+        # Number of random combinations to try
+
+        for _ in pbar:
+            # Sample random parameters
+            params = {
+                "n_neighbors": np.random.randint(3, 21),
+                "weights": np.random.choice(["uniform", "distance"]),
+                "leaf_size": np.random.randint(10, 50),
+                "metric": param_space["metric"][0],  # Use first metric
+                "p": param_space["p"][0],  # Use first p value
+            }
+
+            # Ensure n_neighbors is odd
+            if params["n_neighbors"] % 2 == 0:
+                params["n_neighbors"] += 1
+
+            try:
+                knn = KNeighborsClassifier(**params, algorithm="auto")
+                knn.fit(X_t, y_t)
+                score = knn.score(X_v, y_v)
+
+                if score > best_score:
+                    best_score = score
+                    best_params = params
+                    no_improvement_count = 0
+                    pbar.set_description(f"Best score: {best_score:.4f}")
+                else:
+                    no_improvement_count += 1
+                if no_improvement_count > max_no_improvement:
+                    logger.info("Early stopping triggered - no significant improvement")
+                    break
+
+            except Exception as e:
+                logger.warning(f"Trial failed with parameters {params}: {e}")
+                continue
+
+        logger.info(f"Simple search completed. Best score: {best_score:.4f}")
+        return best_params or param_space  # Return best params or defaults
+
+    def _find_optimal_parameters(
+        self, X_train: np.ndarray, y_train: pd.Series, col_type: str
+    ) -> Dict[str, Any]:
+        """
+        Find optimal parameters using randomized search with early stopping.
+        """
+        param_space = self._get_parameter_space(X_train, y_train, col_type)
+
+        # Calculate number of iterations based on dataset size
+        n_iter = max(5, min(10, len(y_train) // 10))
+        value_counts = pd.Series(y_train).value_counts()
+
+        cv = 2
+        if value_counts.min() < 2:
+            logger.info("Using simple parameter search due to class imbalance")
+            return self._simple_parameter_search(X_train, y_train, param_space)
+        else:
+            logger.info(f"Using {cv}-fold cross-validation based on class distribution")
+
+            # Create base classifier
+            logger.info(f"Starting randomized search with {n_iter} iterations")
+            logger.info(f"Parameter space: {param_space}")
+
+            # Initialize randomized search
+            random_search = RandomizedSearchCV(
+                estimator=KNeighborsClassifier(algorithm="auto"),
+                param_distributions=param_space,
+                n_iter=n_iter,
+                cv=cv,
+                scoring="accuracy",
+                error_score="raise",
+                n_jobs=-1,
+                verbose=self.verbose,
+            )
+
+            try:
+                # Fit randomized search
+                random_search.fit(X_train, y_train)
+
+                # Get best parameters
+                best_params = random_search.best_params_
+
+                # Ensure n_neighbors is odd
+                if best_params["n_neighbors"] % 2 == 0:
+                    best_params["n_neighbors"] += 1
+
+                logger.info(
+                    f"Best parameters found: {best_params} "
+                    f"with score={random_search.best_score_:.4f}"
+                )
+
+                return best_params
+
+            except Exception as e:
+                logger.error(f"Parameter optimization failed: {e}")
+                # Return default parameters if optimization fails
+                return {
+                    "n_neighbors": 3,
+                    "weights": "uniform",
+                    "metric": "hamming" if col_type == "categorical" else "minkowski",
+                    "p": 2,
+                    "leaf_size": 30,
+                    "algorithm": "auto",
+                }
 
     def _impute_column(self, df: pd.DataFrame, target_column: str) -> pd.Series:
         """
@@ -199,10 +373,9 @@ class KNNImputer:
         X = self._prepare_features(df, target_column)
         non_null_mask = y.notna()
         X_train = X[non_null_mask]
+        optimal_params = self._find_optimal_parameters(X_train, y_train, col_type)
 
-        knn = KNeighborsClassifier(
-            n_neighbors=min(self.k, len(y_train)), weights="uniform", algorithm="auto"
-        )
+        knn = KNeighborsClassifier(**optimal_params)
 
         try:
             knn.fit(X_train, y_train)
