@@ -1,4 +1,5 @@
 ###TODO: better commenting and decorators
+###TODO: improve logging
 
 from pathlib import Path
 import logging
