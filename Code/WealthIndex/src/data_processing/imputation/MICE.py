@@ -144,57 +144,185 @@ class MICEImputer:
         )
         return combinations
 
-    def _get_optimal_params(
+    def _generate_all_column_parameter_combinations(
         self,
         df: pd.DataFrame,
-        column_name: str,
-        column_type: str,
+        columns_with_na: List[str],
+        validation_masks: Dict[str, pd.Series],
+    ) -> List[Tuple[str, Dict[str, Any]]]:
+        """Generate all column and parameter combinations upfront."""
+        all_combinations = []
+
+        for column in columns_with_na:
+            column_type = self.determine_column_type(df[column])
+            n_samples = len(df[column])
+            missing_pct = (df[column].isna().sum() / n_samples) * 100
+
+            params_list = self._generate_parameter_combinations(
+                n_samples, column_type, missing_pct, column
+            )
+
+            # Add each parameter combination with its column
+            for params in params_list:
+                all_combinations.append((column, params))
+
+        return all_combinations
+
+    def _validate_single_combination(
+        self,
+        df: pd.DataFrame,
+        column: str,
+        params: Dict[str, Any],
         validation_mask: pd.Series,
-    ) -> Dict[str, Any]:
-        if self.skip_optimizing:
-            return {
-                "n_iter": 5,
-                "n_impute": 3,
-                "method": "bayesian_ridge" if column_type == "numeric" else "logistic",
-            }
+        pbar: tqdm,
+    ) -> Tuple[str, Dict[str, Any], float]:
+        """Validate a single column-parameter combination."""
+        score = self._validate_parameters(df, column, params, validation_mask)
+        pbar.update(1)
+        return column, params, score
 
-        n_samples = len(df[column_name])
-        missing_pct = (df[column_name].isna().sum() / n_samples) * 100
-        param_combinations = self._generate_parameter_combinations(
-            n_samples, column_type, missing_pct, column_name
+    def _get_optimal_params_for_all_columns(
+        self,
+        df: pd.DataFrame,
+        columns_with_na: List[str],
+        validation_masks: Dict[str, pd.Series],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Get optimal parameters for all columns using parallel processing."""
+
+        # Generate all combinations
+        all_combinations = self._generate_all_column_parameter_combinations(
+            df, columns_with_na, validation_masks
         )
-
-        best_score = float("inf")
-        best_params = None
-        start_time = time()
-
-        for index, params in enumerate(param_combinations):
-            logger.info(
-                f"Testing parameter combination {index + 1}/{len(param_combinations)} of {column_name}: {params}"
-            )
-            score = self._validate_parameters(df, column_name, params, validation_mask)
-            expected_total_time = (time() - start_time) / (
-                (index + 1) / len(param_combinations)
-            )
-            logger.info(
-                f"Score for combination {index + 1} of {column_name}: {score:.4f}\n"
-                f"Expected total time: {expected_total_time:.2f}s (remaing: {expected_total_time-(time()-start_time):.2f}s)"
-            )
-
-            if score < best_score:
-                best_score = score
-                best_params = params
 
         logger.info(
-            f"Optimal parameters found for {column_name}: {best_params}, "
-            f"score: {best_score:.4f}, time: {time() - start_time:.1f}s"
+            f"Generated {len(all_combinations)} total parameter combinations across all columns"
         )
+        np.random.shuffle(all_combinations)
+        # Process all combinations in parallel
+        start_time = time()
+        with tqdm(total=len(all_combinations), desc="Validating parameters") as pbar:
+            results = Parallel(
+                n_jobs=self.n_jobs, prefer="threads", verbose=self.verbose
+            )(
+                delayed(self._validate_single_combination)(
+                    df.copy(), column, params, validation_masks[column], pbar
+                )
+                for column, params in all_combinations
+            )
 
-        return best_params or {
-            "n_iter": 5,
-            "n_impute": 3,
-            "method": "bayesian_ridge" if column_type == "numeric" else "logistic",
-        }
+        # Group results by column
+        column_results = {}
+        for column, params, score in results:
+            if column not in column_results:
+                column_results[column] = []
+            column_results[column].append((score, params))
+
+        # Extract best parameters for each column
+        optimal_params = {}
+        for column, result_list in column_results.items():
+            # Sort by primary score
+            result_list.sort(key=lambda x: x[0])
+            best_primary_score = result_list[0][0]
+
+            # Find all parameter sets that tied for best primary score
+            tied_params = [
+                params for score, params in result_list if score == best_primary_score
+            ]
+
+            if len(tied_params) == 1:
+                # No tie - use the best parameters directly
+                optimal_params[column] = tied_params[0]
+            else:
+                # We have a tie - calculate secondary scores
+                logger.info(
+                    f"Found {len(tied_params)} tied configurations for {column} - using secondary scoring"
+                )
+                with tqdm(total=len(tied_params), desc="Breaking tie") as pbar:
+                    secondary_results = Parallel(
+                        n_jobs=self.n_jobs, prefer="threads", verbose=self.verbose
+                    )(
+                        delayed(self._calculate_single_secondary_score)(
+                            df.copy(), column, params, pbar
+                        )
+                        for params in tied_params
+                    )
+                # Choose the parameters with the best (lowest) secondary score
+                optimal_params[column] = min(secondary_results, key=lambda x: x[0])[1]
+
+        logger.info(f"Completed parameter optimization in {time() - start_time:.2f}s")
+        return optimal_params
+
+    def _calculate_single_secondary_score(
+        self, df: pd.DataFrame, column: str, params: Dict[str, Any], pbar: tqdm
+    ) -> Tuple[float, Dict[str, Any]]:
+        """Calculate secondary score for a single parameter set."""
+        imputer = self._get_imputer(df[column], params["method"])
+        secondary_score = self._calculate_secondary_score(df, column, params, imputer)
+        pbar.update(1)
+        return secondary_score, params
+
+    def _calculate_secondary_score(
+        self,
+        df: pd.DataFrame,
+        target_column: str,
+        params: Dict[str, Any],
+        imputer: Union[LinearRegression, LogisticRegression, BayesianRidge],
+    ) -> float:
+        """
+        Calculate secondary score for tie-breaking.
+        Returns a score between 0 and 1 (lower is better).
+        """
+        # Calculate prediction confidence if available
+        confidence_score = 0.5  # Default neutral score
+        if hasattr(imputer, "predict_proba"):
+            try:
+                # Get non-missing data for confidence calculation
+                non_missing_mask = ~df[target_column].isna()
+                X_observed = self._prepare_prediction_features(
+                    df.loc[non_missing_mask], target_column
+                )
+                probas = imputer.predict_proba(X_observed)
+                confidence_score = 1 - np.mean(
+                    np.max(probas, axis=1)
+                )  # Lower is better
+            except:
+                pass  # Keep default confidence score if prediction_proba fails
+
+        # Complexity score based on parameters (normalized to 0-1)
+        complexity_score = (
+            params["n_iter"] / 20.0
+        ) * 0.5 + (  # Penalize high iterations
+            params["n_impute"] / 11.0
+        ) * 0.5  # Penalize high imputation counts
+
+        # Weighted combination (0.67 for confidence, 0.33 for complexity)
+        return 0.67 * confidence_score + 0.33 * complexity_score
+
+    def _prepare_prediction_features(
+        self, df: pd.DataFrame, target_column: str
+    ) -> np.ndarray:
+        """Prepare feature matrix for prediction probability calculation."""
+        predictor_columns = [col for col in df.columns if col != target_column]
+        numeric_predictors = [
+            col
+            for col in predictor_columns
+            if self.determine_column_type(df[col]) == "numeric"
+        ]
+        categorical_predictors = [
+            col for col in predictor_columns if col not in numeric_predictors
+        ]
+
+        X_parts = []
+        if numeric_predictors:
+            X_numeric = df[numeric_predictors].astype(float).values
+            X_parts.append(X_numeric)
+
+        if categorical_predictors:
+            encoder = OneHotEncoder(sparse_output=False, handle_unknown="ignore")
+            X_categorical = encoder.fit_transform(df[categorical_predictors])
+            X_parts.append(X_categorical)
+
+        return np.hstack(X_parts) if len(X_parts) > 1 else X_parts[0]
 
     def _validate_parameters(
         self,
@@ -205,51 +333,38 @@ class MICEImputer:
     ) -> float:
         """
         Validate MICE parameters for a single column using artificially created missing values.
-
-        Args:
-            df: Input DataFrame
-            target_column: Column being imputed
-            params: Dictionary of parameters to validate
-            validation_mask: Boolean series where True indicates values to use for validation
-
-        Returns:
-            float: Error metric (lower is better)
+        Returns normalized error between 0 and 1 for both categorical and numeric columns.
         """
-        # Create a copy of data with additional missing values
         df_validation = df.copy()
-
-        # Set validation values to NaN
         df_validation.loc[validation_mask, target_column] = np.nan
-
-        # Store original values for comparison
         true_values = df.loc[validation_mask, target_column]
 
-        # Time the imputation
         start_time = time()
-
-        # Perform MICE imputation with current parameters
         imputed_values = self._impute_single_column(
             df_validation, target_column, params
         )
-
         processing_time = time() - start_time
 
-        # Calculate error based on data type
         if self.determine_column_type(df[target_column]) == "numeric":
-            # For numeric columns, use RMSE
-            error = np.sqrt(
+            # For numeric columns, normalize RMSE by the range of the data
+            data_range = df[target_column].max() - df[target_column].min()
+            if data_range == 0:  # Handle constant columns
+                data_range = 1.0
+
+            rmse = np.sqrt(
                 mean_squared_error(true_values, imputed_values[validation_mask])
             )
-
+            # Normalize to 0-1 scale
+            error = min(rmse / data_range, 1.0)
         else:
-            # For categorical columns, use misclassification rate
+            # For categorical columns, already 0-1 scale (misclassification rate)
             error = 1 - accuracy_score(true_values, imputed_values[validation_mask])
 
-        logger.debug(
+        logger.info(
             f"Validation for {target_column} - "
             f"Parameters: {params}, "
-            f"Error: {error:.4f}, "
-            f"Time: {processing_time:.2f}s, "
+            f"Normalized Error: {error:.4f}, "
+            f"Time: {processing_time:.2f}s"
         )
 
         return error
@@ -625,13 +740,14 @@ class MICEImputer:
         return df_processed, column_types
 
     def impute(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Impute missing values using MICE with parallel processing."""
+        """Modified impute method to use the new parameter optimization approach."""
         self.tracker.start_column("total")
         logger.info("Starting MICE imputation")
 
         # Preprocess datatypes
         df_processed, column_types = self._preprocess_datatypes(df)
         original_dtypes = df.dtypes.to_dict()
+
         # Find columns to impute
         columns_with_na = [
             col for col in df_processed.columns if df_processed[col].isna().any()
@@ -640,19 +756,25 @@ class MICEImputer:
             logger.info("No missing values found")
             return df_processed
 
-        # Create validation masks for parameter optimization
+        # Create validation masks
         validation_masks = self._create_validation_masks(df_processed, columns_with_na)
-        # Configure parallel processing
 
+        # Get optimal parameters for all columns
+        optimal_params = self._get_optimal_params_for_all_columns(
+            df_processed, columns_with_na, validation_masks
+        )
+
+        # Perform imputation with optimal parameters
         with tqdm(total=len(columns_with_na), desc="Imputing columns") as pbar:
             results = Parallel(
-                n_jobs=self.n_jobs, verbose=self.verbose, prefer="threads"
+                n_jobs=self.n_jobs, prefer="threads", verbose=self.verbose
             )(
                 delayed(self._process_single_column)(
                     df_processed.copy(),
                     column,
                     validation_masks[column],
                     original_dtypes[column],
+                    optimal_params[column],
                     pbar,
                 )
                 for column in columns_with_na
@@ -660,15 +782,7 @@ class MICEImputer:
 
         # Update imputed values
         for column, imputed_values in zip(columns_with_na, results):
-            df_processed[column] = imputed_values
-
-        # Update imputed values
-        for column, imputed_values in zip(columns_with_na, results):
-            df_processed[column] = imputed_values
-
-        # Restore original dtypes
-        for column in df_processed.columns:
-            df_processed[column] = df_processed[column].astype(original_dtypes[column])
+            df_processed[column] = imputed_values.astype(original_dtypes[column])
 
         self.tracker.finish_column("total")
         summary = self.tracker.get_summary()
@@ -676,10 +790,6 @@ class MICEImputer:
         logger.info(
             f"Completed MICE imputation in {summary['total_time']:.2f}s\n"
             f"Average time per column: {summary['average_duration']:.2f}s"
-        )
-        print(
-            "\nColumn types after imputing:",
-            {col: str(df_processed[col].dtype) for col in df_processed.columns},
         )
 
         return df_processed
@@ -713,25 +823,24 @@ class MICEImputer:
         column: str,
         validation_mask: pd.Series,
         original_dtype: np.dtype,
+        optimal_params: Dict[str, Any],  # Added this parameter
         pbar: tqdm,
     ) -> pd.Series:
-        """Process a single column for imputation with parameter optimization."""
+        """Process a single column for imputation using pre-computed optimal parameters."""
         self.tracker.start_column(column)
 
-        # Get column type and missing percentage
+        # Get column type and missing percentage for logging
         column_type = self.determine_column_type(df[column])
         missing_pct = (df[column].isna().sum() / len(df)) * 100
 
         self.tracker.update_column(
-            column, {"type": column_type, "missing_percentage": missing_pct}
+            column,
+            {
+                "type": column_type,
+                "missing_percentage": missing_pct,
+                "optimal_params": optimal_params,
+            },
         )
-
-        # Get optimal parameters
-        optimal_params = self._get_optimal_params(
-            df, column, column_type, validation_mask
-        )
-
-        self.tracker.update_column(column, {"optimal_params": optimal_params})
 
         # Perform imputation
         imputed_values = self._impute_single_column(df, column, optimal_params)

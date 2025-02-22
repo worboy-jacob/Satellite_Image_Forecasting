@@ -111,7 +111,7 @@ missing_threshold: 0.5
 
 # Analysis configuration
 imputation: "MICE"
-verbose: 10
+verbose: 10 ###The level of detail returned by Parallel. 0 is none, 10 is high for debugging but technically goes up to 100
 skip_optimizing: False ###TODO: Set to false when actually running
 
 # FAMD analysis configuration
