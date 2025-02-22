@@ -1,4 +1,5 @@
 import logging
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from src.utils.paths import get_logs_dir
@@ -25,11 +26,16 @@ def setup_logging(log_level: str = "INFO") -> logging.Logger:
         encoding="utf-8",
     )
     file_handler.setFormatter(formatter)
+    file_handler.setLevel(log_level)
     logger.addHandler(file_handler)
 
     # Set up console handler
-    console_handler = logging.StreamHandler()
+    console_handler = logging.StreamHandler(sys.stdout)  # Changed to sys.stdout
     console_handler.setFormatter(formatter)
+    console_handler.setLevel(log_level)
     logger.addHandler(console_handler)
+
+    logger.handlers[0].flush = sys.stdout.flush
+    logger.handlers[1].flush = sys.stdout.flush
 
     return logger
