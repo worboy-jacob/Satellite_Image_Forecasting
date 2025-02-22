@@ -1,6 +1,6 @@
 # Output configuration
 results_path: "data/Results/WealthIndex"
-log_level: "INFO"
+log_level: "INFO" ###TODO: Update this
 ###TODO: Add comments here for all data
 # Data sources configuration
 country_year:
@@ -110,10 +110,13 @@ replace_val:
 missing_threshold: 0.5
 
 # Analysis configuration
-imputation: "KNN"
-verbose: 3 ###Change for detail level of progress
+imputation: "MICE"
+verbose: 10
+skip_optimizing: False ###TODO: Set to false when actually running
 
 # FAMD analysis configuration
-n_simulations: 10
+n_simulations: 10 ###TODO: update to 1000 when actually running
 plot_contributions: True
 run_parallel_analysis: True
+
+n_jobs: -2 ###TODO: Can be set as -1 to use all cores, or -2 for all cores except 1

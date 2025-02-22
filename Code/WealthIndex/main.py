@@ -6,16 +6,17 @@ import pandas as pd
 import logging
 import time
 
+
 from src.utils.paths import get_project_root, get_logs_dir, get_configs_dir
 
 project_root = get_project_root()
 sys.path.insert(0, str(project_root))
-
+###TODO: Update log levels to be more inline with what we want
 # Local imports
 from src.utils.config import Config
 from src.utils.logging_config import setup_logging
 from src.data_processing.processor import DataProcessor
-from src.data_processing.imputer import KNNImputer
+from src.data_processing.imputation.imputer import ImputerManager
 from src.analysis.famd import FAMDAnalyzer
 
 
@@ -52,17 +53,16 @@ def main():
         create_directory_structure()
         validate_data_structure()
 
-        # Initialize logging
-        logger = setup_logging()  ###TODO: add level from config
-        logger.info("Starting wealth index calculation")
-
         # Load configuration
         config_path = get_configs_dir() / "config.yaml"
         config = Config(config_path).config
-
+        logger = setup_logging(
+            log_level=config.get("log_level", "INFO")
+        )  ###TODO: add level from config
+        logger.info("Starting wealth index calculation")
+        imputer_manager = ImputerManager(config)
         # Initialize processors
         processor = DataProcessor(config)
-        imputer = KNNImputer(config)
         analyzer = FAMDAnalyzer(config)
 
         # Load and process data
@@ -79,7 +79,7 @@ def main():
             logger.info(f"Processing dataset: {country_year}")
 
             # Impute missing values
-            imputed_df = imputer.impute(df)
+            imputed_df = imputer_manager.impute(df)
             processed_frames[country_year] = imputed_df
 
         # Merge all processed dataframes
