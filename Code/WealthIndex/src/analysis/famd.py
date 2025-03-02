@@ -203,36 +203,83 @@ class FAMDAnalyzer:
         if self.config.get("run_parallel_analysis", False):
             start_time = time()
             n_simulations = self.config.get("n_simulations", 1000)
-            components = self._run_parallel_analysis(famd, df_processed, n_simulations)
+            components = self._run_parallel_analysis(
+                famd, df_processed.copy(), n_simulations
+            )
             logger.info(
                 f"Parallel analysis selected {len(components)} components after {time()-start_time}s"
             )
         else:
-            components = [0]  # Just use first component
-            logger.info("Using only first component")
+            components = list(range(len(famd.eigenvalues_)))
+            logger.info("Using all components")
 
         # Plot contributions if requested
         if self.config.get("plot_contributions", False):
             self._plot_contributions(famd, components)
 
-        # Calculate wealth index
-        var_explained = (
-            pd.to_numeric(famd.eigenvalues_summary["% of variance"].str.rstrip("%"))
-            / 100
-        )
-        component_weights = var_explained[components] / var_explained[components].sum()
-
-        wealth_index = np.zeros(len(df_processed))
-        for i, comp in enumerate(components):
-            wealth_index += (
-                famd.row_coordinates(df_processed)[comp] * component_weights[i]
+        wealth_indicators = {
+            "hv206": ["yes"],  # Has electricity
+            "hv207": ["yes"],  # Has radio
+            "hv208": ["yes"],  # Has television
+            "hv209": ["yes"],  # Has refrigerator
+            "hv211": ["yes"],  # Has motorcycle
+            "hv212": ["yes"],  # Has car
+        }
+        wealth_score = np.zeros(len(df_processed))
+        for col, values in wealth_indicators.items():
+            if col in df_processed.columns:
+                for val in values:
+                    try:
+                        wealth_score += (df_processed[col] == val).astype(int)
+                    except Exception as e:
+                        logger.warning(f"Error processing indicator {col}: {e}")
+        row_coords = famd.row_coordinates(df_processed)
+        invert_components = []
+        component_correlations = []
+        for comp in components:
+            correlation = np.corrcoef(wealth_score, row_coords[comp])[0, 1]
+            component_correlations.append(correlation)
+            logger.debug(
+                f"Component {comp} correlation with wealth score: {correlation:.4f}"
             )
 
+            if correlation < 0:
+                invert_components.append(comp)
+                logger.info(
+                    f"Component {comp} will be inverted (correlation: {correlation:.4f})"
+                )
+        abs_correlations = np.abs(component_correlations)
+        correlation_weights = abs_correlations / np.sum(abs_correlations)
+        wealth_index = np.zeros(len(df_processed))
+        for i, comp_idx in enumerate(components):
+            component_value = row_coords[comp_idx].copy()
+
+            # Invert if needed
+            if comp_idx in invert_components:
+                component_value = -component_value
+
+            wealth_index += component_value * correlation_weights[i]
+
+        multi = self.config.get("iqr_multiplier", 1.5)
+        wealth_index_copy = wealth_index.copy()
+        q1, q3 = np.percentile(wealth_index, [25, 75])
+        iqr = q3 - q1
+        lower_bound = q1 - (multi * iqr)
+        upper_bound = q3 + (multi * iqr)
+        wealth_index_copy = np.clip(wealth_index_copy, lower_bound, upper_bound)
         # Create result DataFrame
         result = pd.concat(
-            [df_ids, pd.Series(wealth_index, name="wealth_index")], axis=1
-        )  ###TODO: Normalize from 0 to 1 maybe
+            [df_ids, pd.Series(wealth_index_copy, name="wealth_index")], axis=1
+        )
 
+        # Normalize wealth index to 0-1 range
+        if self.config.get("normalize_index", True):
+            min_val = result["wealth_index"].min()
+            max_val = result["wealth_index"].max()
+            result["wealth_index"] = (result["wealth_index"] - min_val) / (
+                max_val - min_val
+            )
+            logger.info("Wealth index normalized to 0-1 range")
         return result
 
     def _simulation_wrapper_optimized(self, n_features, n_samples, column_info):
