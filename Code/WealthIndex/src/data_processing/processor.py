@@ -186,7 +186,8 @@ class DataProcessor:
 
                 data_file = next(data_path.glob("*.DTA"), None)
                 if data_file:
-                    dfs[key] = self.load_data(data_file)
+                    year_int = int(year_str)
+                    dfs[key] = self.load_data(data_file, year_int)
 
         # Process common columns
         common_columns = self._get_common_columns(dfs)
@@ -194,11 +195,12 @@ class DataProcessor:
 
         return dfs
 
-    def load_data(self, file_path: Path) -> pd.DataFrame:
+    def load_data(self, file_path: Path, year: int) -> pd.DataFrame:
         """
         Load and preprocess single data file with enhanced validation.
         """
         df = pd.read_stata(file_path, columns=self.config["columns_to_include"])
+        df["hv007"] = year
 
         # Calculate and log initial missing data percentages
         missing_pct = df.isnull().mean()
