@@ -204,7 +204,6 @@ class KNNImputer(BaseImputer):
             "minkowski": 0.3,  # More complex, parameter-dependent
             "chebyshev": 0.25,  # Less common
             "hamming": 0.1,  # Simple for categorical
-            "jaccard": 0.2,  # More complex for categorical
         }
         metric_score = metric_complexity.get(params["metric"], 0.3)
 
@@ -279,13 +278,13 @@ class KNNImputer(BaseImputer):
                 else ["euclidean", "manhattan"]
             )
         else:
-            metrics = ["hamming", "jaccard"] if n_samples > 5000 else ["hamming"]
+            metrics = ["hamming"] if n_samples > 5000 else ["hamming"]
 
         # --- Weights Strategy ---
         weights_options = ["uniform", "distance"]
 
         # --- Algorithm Strategy (Ensure Compatibility) ---
-        if any(m in ["hamming", "jaccard"] for m in metrics):
+        if any(m in ["hamming"] for m in metrics):
             algorithm_options = ["auto", "ball_tree"]  # Categorical needs BallTree
         elif n_samples > 10000:
             algorithm_options = ["auto", "ball_tree", "kd_tree"]
@@ -593,6 +592,14 @@ class KNNImputer(BaseImputer):
         logger.info(f"Imputing missing values for dataset: {country_year}")
         self.tracker.start_column("total")
         numerical_columns = []
+        for col in df.columns:
+            unique_values = df[col].dropna().unique()
+            if len(unique_values) == 1 and df[col].isna().any():
+                logger.info(
+                    f"Column {col} has only one unique value: {unique_values[0]} - using constant imputation"
+                )
+                # Simply fill missing values with the single value
+                df[col] = df[col].fillna(unique_values[0])
         for col in df.columns:
             col_type = self.determine_column_type(df[col])
             if col_type == "numeric":

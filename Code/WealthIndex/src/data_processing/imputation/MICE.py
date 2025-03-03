@@ -393,6 +393,13 @@ class MICEImputer(BaseImputer):
     def impute(self, df: pd.DataFrame, country_year: str) -> Tuple[pd.DataFrame, float]:
         """Perform MICE imputation on the entire dataset."""
         logger.info(f"Imputing missing values using MICE for {country_year}")
+        for col in df.columns:
+            unique_values = df[col].dropna().unique()
+            if len(unique_values) == 1 and df[col].isna().any():
+                logger.info(
+                    f"Column {col} has only one unique value: {unique_values[0]} - using constant imputation"
+                )
+                # Simply fill missing values with the single
         return self._common_imputation_workflow(
             df=df,
             imputation_name="MICE",
