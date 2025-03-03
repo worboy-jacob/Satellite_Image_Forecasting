@@ -400,6 +400,7 @@ class MICEImputer(BaseImputer):
                     f"Column {col} has only one unique value: {unique_values[0]} - using constant imputation"
                 )
                 # Simply fill missing values with the single
+                df[col] = df[col].fillna(unique_values[0])
         return self._common_imputation_workflow(
             df=df,
             imputation_name="MICE",
