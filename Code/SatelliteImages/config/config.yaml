@@ -1,0 +1,41 @@
+countries:
+  - name: "Senegal"
+    iso: "SEN"
+    years: [2023, 2019, 2018, 2017, 2016, 2015]
+    crs: "EPSG:32628"
+    validate_files: True
+    validation_sample_ratio: 0.2
+
+  - name: "Ghana"
+    iso: "GHA"
+    years: [2022]
+    crs: "EPSG:32630" 
+
+log_level: "INFO"
+
+cell_size_km: 5
+min_area_percent: 40.0
+
+max_workers: -2
+verbose: 10
+
+
+sentinel:
+  bands: ["B2", "B3", "B4", "B8", "B5", "B6", "B7", "B11", "B12"]
+  cloud_threshold: 20
+  composite_method: "median"
+
+viirs:
+  product: "NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG"
+  band: "avg_rad"
+
+features:
+  extract:
+    - "ndvi"
+    - "built_up_index"
+    - "nightlight_intensity"
+    - "nightlight_gradient"
+
+output:
+  format: "numpy"
+  directory: "SatelliteImageData"
