@@ -20,7 +20,7 @@ def setup_logging(log_level: str = "INFO") -> logging.Logger:
     log_path.mkdir(parents=True, exist_ok=True)
     # 5 MB per file, keep 3 backup files
     file_handler = RotatingFileHandler(
-        log_path / "wealth_index.log",
+        log_path / "image_processing.log",
         maxBytes=5 * 1024 * 1024,  # 5 MB
         backupCount=3,
         encoding="utf-8",

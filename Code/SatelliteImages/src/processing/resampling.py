@@ -208,6 +208,10 @@ def process_and_save_bands(
     Returns:
         Path to the saved NPZ file
     """
+    processed_bands = {}
+    for band_name, band_array in band_arrays.items():
+        if band_array is not None:
+            processed_bands[band_name] = resample_to_256x256(band_array)
     # Create output directory
     cell_dir = output_dir / country_name / str(year) / f"cell_{cell_id}"
     cell_dir.mkdir(parents=True, exist_ok=True)
@@ -217,13 +221,13 @@ def process_and_save_bands(
 
     # Check if we have the necessary bands
     required_bands = ["B2", "B3", "B4", "B8", "B11", "B12"]
-    missing_bands = [band for band in required_bands if band not in band_arrays]
+    missing_bands = [band for band in required_bands if band not in processed_bands]
 
     if missing_bands:
         logger.warning(f"Missing bands for cell {cell_id}: {missing_bands}")
 
     # Process individual bands
-    for band_name, band_array in band_arrays.items():
+    for band_name, band_array in processed_bands.items():
         # Skip if band is None
         if band_array is None:
             continue
@@ -232,12 +236,12 @@ def process_and_save_bands(
         resampled = resample_to_256x256(band_array)
 
         # Store resampled band temporarily
-        band_arrays[band_name] = resampled
+        processed_bands[band_name] = resampled
 
     # Create RGB composite if possible
-    if all(band in band_arrays for band in ["B4", "B3", "B2"]):
+    if all(band in processed_bands for band in ["B4", "B3", "B2"]):
         rgb = create_rgb_composite(
-            band_arrays["B4"], band_arrays["B3"], band_arrays["B2"]
+            processed_bands["B4"], processed_bands["B3"], processed_bands["B2"]
         )
         # Normalize and quantize RGB to uint8
         if rgb is not None:
@@ -251,15 +255,15 @@ def process_and_save_bands(
             )
 
     # Calculate NDVI if possible
-    if all(band in band_arrays for band in ["B8", "B4"]):
-        ndvi = calculate_ndvi(band_arrays["B8"], band_arrays["B4"])
+    if all(band in processed_bands for band in ["B8", "B4"]):
+        ndvi = calculate_ndvi(processed_bands["B8"], processed_bands["B4"])
         # Normalize and quantize NDVI to uint8
         if ndvi is not None:
             processed_data["ndvi"] = normalize_and_quantize(ndvi, "ndvi", "uint8")
 
     # Calculate Built-up Index if possible
-    if all(band in band_arrays for band in ["B11", "B8"]):
-        bui = calculate_built_up_index(band_arrays["B11"], band_arrays["B8"])
+    if all(band in processed_bands for band in ["B11", "B8"]):
+        bui = calculate_built_up_index(processed_bands["B11"], processed_bands["B8"])
         # Normalize and quantize BUI to uint8
         if bui is not None:
             processed_data["built_up"] = normalize_and_quantize(
@@ -270,10 +274,10 @@ def process_and_save_bands(
     bands_to_keep = {"B8": "nir", "B11": "swir1", "B12": "swir2"}
     band_type_mapping = {"B8": "nir", "B11": "swir", "B12": "swir"}
     for band_name, output_name in bands_to_keep.items():
-        if band_name in band_arrays and band_arrays[band_name] is not None:
+        if band_name in processed_bands and processed_bands[band_name] is not None:
             # Normalize and quantize to uint16
             processed_data[output_name] = normalize_and_quantize(
-                band_arrays[band_name],
+                processed_bands[band_name],
                 band_type_mapping.get(band_name, "unknown"),
                 "uint16",
             )
@@ -289,52 +293,6 @@ def process_and_save_bands(
         return None
 
 
-def save_metadata(
-    npz_path: Path,
-    country_name: str,
-    cell_id: int,
-    year: int,
-    processed_data: Dict[str, np.ndarray],
-) -> None:
-    """
-    Save metadata about the processed data.
-
-    Args:
-        npz_path: Path to the NPZ file
-        country_name: Name of the country
-        cell_id: ID of the grid cell
-        year: Year of the data
-        processed_data: Dictionary of processed arrays
-    """
-    from datetime import datetime
-    import json
-
-    # Create metadata
-    metadata = {
-        "country": country_name,
-        "cell_id": int(cell_id),
-        "year": year,
-        "processed_date": datetime.now().isoformat(),
-        "file_size_bytes": os.path.getsize(npz_path) if npz_path.exists() else 0,
-        "arrays": {
-            name: {
-                "shape": arr.shape,
-                "dtype": str(arr.dtype),
-                "min": float(np.min(arr)),
-                "max": float(np.max(arr)),
-            }
-            for name, arr in processed_data.items()
-        },
-    }
-
-    # Save metadata
-    metadata_path = npz_path.parent / "metadata.json"
-    with open(metadata_path, "w") as f:
-        json.dump(metadata, f, indent=2)
-
-    logger.info(f"Saved metadata to {metadata_path}")
-
-
 def cleanup_original_files(
     output_dir: Path, country_name: str, cell_id: int, year: int
 ) -> None:
@@ -342,26 +300,43 @@ def cleanup_original_files(
     Clean up original band files after processing.
 
     Args:
-        output_dir: Base output directory
+        output_dir: Base output directory (should be cell directory)
         country_name: Name of the country
         cell_id: ID of the grid cell
         year: Year of the data
     """
-    cell_dir = output_dir / country_name / str(year) / f"cell_{cell_id}"
+    # This should be the cell directory already
+    cell_dir = output_dir
+    original_dir = cell_dir / "original"
 
     # Check if the directory exists
-    if not cell_dir.exists():
+    if not original_dir.exists():
+        logger.debug(f"No original directory found for cell {cell_id}")
         return
 
     # Find all .tif files
-    tif_files = list(cell_dir.glob("*.tif"))
+    tif_files = list(original_dir.glob("*.tif"))
+
+    if not tif_files:
+        logger.debug(f"No TIF files found in {original_dir}")
+        return
 
     # Delete them
+    deleted_count = 0
     for file in tif_files:
         try:
             file.unlink()
+            deleted_count += 1
             logger.debug(f"Deleted original file: {file}")
         except Exception as e:
             logger.warning(f"Failed to delete {file}: {e}")
 
-    logger.info(f"Cleaned up {len(tif_files)} original files for cell {cell_id}")
+    # Try to remove the empty directory
+    try:
+        if not list(original_dir.iterdir()):
+            original_dir.rmdir()
+            logger.debug(f"Removed empty original directory for cell {cell_id}")
+    except Exception as e:
+        logger.warning(f"Could not remove original directory: {e}")
+
+    logger.info(f"Cleaned up {deleted_count} original files for cell {cell_id}")

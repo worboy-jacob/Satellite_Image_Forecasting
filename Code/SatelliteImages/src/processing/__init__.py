@@ -13,7 +13,6 @@ from src.processing.resampling import (
     calculate_built_up_index,
     create_rgb_composite,
     process_and_save_bands,
-    save_metadata,
     cleanup_original_files,
 )
 
@@ -24,6 +23,5 @@ __all__ = [
     "calculate_built_up_index",
     "create_rgb_composite",
     "process_and_save_bands",
-    "save_metadata",
     "cleanup_original_files",
 ]

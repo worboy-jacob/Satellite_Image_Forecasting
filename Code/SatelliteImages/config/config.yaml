@@ -1,7 +1,7 @@
 countries:
   - name: "Senegal"
     iso: "SEN"
-    years: [2023, 2019, 2018, 2017, 2016, 2015]
+    years: [2023, 2019, 2018, 2017, 2016, 2015,2024]
     crs: "EPSG:32628"
     validate_files: True
     validation_sample_ratio: 0.2

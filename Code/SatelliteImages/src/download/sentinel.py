@@ -36,14 +36,13 @@ import gc
 from src.processing.resampling import (
     resample_to_256x256,
     process_and_save_bands,
-    save_metadata,
     cleanup_original_files,
 )
+import random
 
 logger = logging.getLogger("image_processing")
 for handler in logger.handlers:
     handler.flush = sys.stdout.flush
-
 
 BAND_RESOLUTION = {
     # 10m bands
@@ -197,6 +196,9 @@ def download_sentinel_for_country_year(
     """
     Download Sentinel-2 data for all cells of a specific country-year pair using optimized parallel processing.
     """
+    # Start the request rate monitoring thread
+    monitor_thread = threading.Thread(target=monitor_request_rate, daemon=True)
+    monitor_thread.start()
     # Initialize Earth Engine with appropriate endpoint
     initialize_earth_engine(config)
     early_year = False
@@ -276,9 +278,9 @@ def download_sentinel_for_country_year(
     memory_per_cell_gb = config["memory_per_worker_gb"]
     available_memory_gb = psutil.virtual_memory().available / (1024**3)
 
-    # Use 70% of available memory, divided by memory per cell
+    # Use more of available memory for batch size calculation
     memory_based_batch_size = max(
-        10, int((available_memory_gb * 0.8) / memory_per_cell_gb)
+        10, int((available_memory_gb * 0.9) / memory_per_cell_gb)
     )
 
     # Cap batch size at a reasonable maximum
@@ -332,7 +334,6 @@ def download_sentinel_for_country_year(
 
                     if not success:
                         logger.warning(f"Failed to process cell {cell_id}")
-
             # Force garbage collection between batches
             gc.collect()
 
@@ -368,7 +369,7 @@ def create_optimized_session(max_workers=None, use_high_volume=True):
             allowed_methods=["GET", "POST"],
         )
         # Longer timeouts for high-volume endpoint
-        timeout = (30, 300)  # 30s connect, 5min read
+        timeout = (15, 180)  # 30s connect, 5min read
     else:
         # Standard endpoint settings
         retry_strategy = Retry(
@@ -377,7 +378,7 @@ def create_optimized_session(max_workers=None, use_high_volume=True):
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["GET", "POST"],
         )
-        timeout = (15, 180)  # 15s connect, 3min read
+        timeout = (10, 120)  # 15s connect, 3min read
 
     # Calculate optimal connection pool size
     if max_workers is None:
@@ -557,6 +558,7 @@ def process_sentinel_cell_optimized(
             target_crs=target_crs,
             session=session,
             early_year=early_year,
+            cell_id=cell_id,
         )
 
         if not band_arrays:
@@ -614,6 +616,7 @@ def process_sentinel_cell_optimized(
 def download_sentinel_data_optimized(
     grid_cell: gpd.GeoDataFrame,
     year: int,
+    cell_id,
     bands: List[str],
     cloud_threshold: int = 20,
     composite_method: str = "median",
@@ -624,60 +627,74 @@ def download_sentinel_data_optimized(
     early_year: bool = False,
 ) -> Dict[str, np.ndarray]:
     """
-    Optimized version of download_sentinel_data.
-
-    Args:
-        grid_cell: GeoDataFrame containing a single grid cell
-        year: Year to download data for
-        bands: List of bands to download
-        cloud_threshold: Maximum cloud cover percentage
-        composite_method: Method for compositing images
-        images_per_month: Target number of images per month
-        total_target: Overall target number of images
-        target_crs: Target CRS
-        session: HTTP session to use for downloads
-
-    Returns:
-        Dictionary mapping band names to numpy arrays
+    Optimized version of download_sentinel_data with parallel month processing.
     """
     try:
         # Get monthly date ranges for the year
         date_ranges = get_monthly_date_ranges(year)
+        month_workers = min(6, max(3, psutil.cpu_count(logical=False)))
+        # Process months in parallel instead of sequentially
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=month_workers
+        ) as month_executor:
+            # Create a function to process a single month
+            def process_single_month(month_data):
+                month_idx, (start_date, end_date) = month_data
+                time.sleep(random.uniform(0.1, 0.5))
+                # Get collection for this month using optimized function
+                collection = get_sentinel_collection_optimized(
+                    grid_cell=grid_cell,
+                    start_date=start_date,
+                    end_date=end_date,
+                    cloud_threshold=cloud_threshold,
+                    bands=bands,
+                    early_year=early_year,
+                )
 
-        # Collect images from each month - use optimized collection retrieval
-        monthly_counts = []
-        selected_collections = []
-        total_selected = 0
+                # Get the count of images for this month
+                count = collection.size().getInfo()
 
-        # First pass: get counts and select top images for each month
-        for month_idx, (start_date, end_date) in enumerate(date_ranges):
-            month_num = month_idx + 1
+                # Select top images by cloud cover if available
+                if count > 0:
+                    # Sort by cloud cover (ascending)
+                    sorted_collection = collection.sort("CLOUDY_PIXEL_PERCENTAGE")
 
-            # Get collection for this month using optimized function
-            collection = get_sentinel_collection_optimized(
-                grid_cell=grid_cell,
-                start_date=start_date,
-                end_date=end_date,
-                cloud_threshold=cloud_threshold,
-                bands=bands,
-                early_year=early_year,
-            )
+                    # Take up to images_per_month images
+                    month_selection = sorted_collection.limit(images_per_month)
+                    month_selection_count = min(count, images_per_month)
 
-            # Get the count of images for this month
-            count = collection.size().getInfo()
-            monthly_counts.append(count)
+                    return (month_idx, count, month_selection, month_selection_count)
+                else:
+                    return (month_idx, 0, None, 0)
 
-            # Select top images by cloud cover
-            if count > 0:
-                # Sort by cloud cover (ascending)
-                sorted_collection = collection.sort("CLOUDY_PIXEL_PERCENTAGE")
+            # Submit all months for parallel processing
+            month_futures = {}
+            for month_idx, date_range in enumerate(date_ranges):
+                time.sleep(0.2)
+                future = month_executor.submit(
+                    process_single_month, (month_idx, date_range)
+                )
+                month_futures[future] = month_idx
+                # Add a small delay between submissions to smooth out request rate
+                time.sleep(0.1)
 
-                # Take up to images_per_month images
-                month_selection = sorted_collection.limit(images_per_month)
-                month_selection_count = min(count, images_per_month)
+            # Process results as they complete
+            monthly_counts = [0] * 12  # Initialize count array for all months
+            selected_collections = []
+            total_selected = 0
 
-                selected_collections.append(month_selection)
-                total_selected += month_selection_count
+            for future in concurrent.futures.as_completed(month_futures):
+                try:
+                    month_idx, count, month_selection, month_selection_count = (
+                        future.result()
+                    )
+                    monthly_counts[month_idx] = count
+
+                    if month_selection is not None:
+                        selected_collections.append(month_selection)
+                        total_selected += month_selection_count
+                except Exception as e:
+                    logger.error(f"Error processing month: {e}")
 
         # If we have fewer than total_target images, get more from months with extras
         if total_selected < total_target:
@@ -742,7 +759,7 @@ def download_sentinel_data_optimized(
 
         # Get the total number of images
         total_images = merged_collection.size().getInfo()
-        logger.info(f"Final image count for {year}: {total_images}")
+        logger.info(f"Final image count for cell: {cell_id} {year}: {total_images}")
 
         # Convert grid cell to WGS84 for Earth Engine region definition
         grid_cell_wgs84 = grid_cell.to_crs("EPSG:4326")
@@ -764,7 +781,7 @@ def download_sentinel_data_optimized(
 
         # Process bands in parallel using ThreadPoolExecutor
         with concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(len(bands), 9)
+            max_workers=min(len(bands) * 2, 20)
         ) as executor:
             # Submit download tasks for each band
             future_to_band = {}
@@ -931,51 +948,74 @@ def download_single_band(
 
 def calculate_optimal_workers(config):
     """
-    Calculate the optimal number of worker threads based on system resources and EE limits.
+    Calculate the optimal number of worker threads based on system resources and EE limits,
+    with special handling for I/O-bound workloads.
     """
     import psutil
 
     # Get configured max workers
     configured_max = config.get("max_workers", None)
-
     if configured_max is not None and configured_max > 0:
         return configured_max
 
     # Check if using high-volume endpoint
     use_high_volume = config.get("use_high_volume_endpoint", True)
 
-    # Standard endpoint
+    # Earth Engine rate limits
     ee_rate_limit = 6000 / 60
-    max_concurrent = 40
+    max_concurrent = 40 if not use_high_volume else 80
 
-    # Use measured requests per cell if available, otherwise use a conservative estimate
+    # Calculate request-based limit
     avg_requests = request_counter.get_average()
-    requests_per_cell = max(avg_requests, 5) if avg_requests > 0 else 20
+    requests_per_cell = max(avg_requests, 8) if avg_requests > 0 else 8
+    rate_multiplier = 3.0 if use_high_volume else 2.5
+    rate_limited_workers = int((ee_rate_limit / requests_per_cell) * rate_multiplier)
 
-    # Calculate rate-limited workers
-    rate_limited_workers = int(ee_rate_limit / requests_per_cell)
-
-    # CPU-based limit
+    # CPU-based limit - more aggressive for I/O bound workloads
     cpu_count = psutil.cpu_count(logical=True)
-    cpu_based_limit = max(cpu_count * 2, 4)  # At least 4 workers
+
+    # Check current CPU usage
+    current_cpu_percent = psutil.cpu_percent(interval=0.5)
+
+    # If CPU usage is low, we can be more aggressive with worker count
+    if current_cpu_percent < 50:
+        # For I/O bound workloads, we can use many more workers than CPU cores
+        cpu_based_limit = max(cpu_count * 4, 8)  # Much more aggressive
+        logger.info(
+            f"Low CPU usage detected ({current_cpu_percent}%), increasing worker limit"
+        )
+    else:
+        # Standard calculation for higher CPU usage
+        cpu_based_limit = max(cpu_count * 2, 4)
 
     # Memory-based limit
     available_memory_gb = psutil.virtual_memory().available / (1024**3)
-    memory_per_worker = config.get("memory_per_worker_gb", 1.0)
+    memory_per_worker = config.get("memory_per_worker_gb", 0.7)
     memory_based_limit = max(int(available_memory_gb / memory_per_worker), 4)
 
     # Network-based limit
-    network_based_limit = max_concurrent  # Based on endpoint
+    network_based_limit = max_concurrent
 
-    # Take the minimum of all limits
-    optimal_limit = min(
-        cpu_based_limit, memory_based_limit, network_based_limit, rate_limited_workers
-    )
+    # Calculate optimal limit with priority on rate limit
+    if (
+        rate_limited_workers < memory_based_limit
+        and rate_limited_workers < cpu_based_limit
+    ):
+        # Rate limit is the bottleneck
+        optimal_limit = min(network_based_limit, rate_limited_workers)
+    elif memory_based_limit < cpu_based_limit:
+        # Memory is the bottleneck
+        optimal_limit = min(network_based_limit, memory_based_limit)
+    else:
+        # CPU would be the bottleneck, but we're I/O bound, so be more aggressive
+        optimal_limit = min(
+            network_based_limit, int(cpu_based_limit * 1.5)  # Increase by 50%
+        )
 
     logger.info(
-        f"Calculated worker limits: CPU={cpu_based_limit}, Memory={memory_based_limit}, "
-        f"Network={network_based_limit}, EE Rate={rate_limited_workers} "
-        f"(based on {requests_per_cell:.1f} requests/cell)"
+        f"Calculated worker limits: CPU={cpu_based_limit} (usage: {current_cpu_percent}%), "
+        f"Memory={memory_based_limit}, Network={network_based_limit}, "
+        f"EE Rate={rate_limited_workers} (based on {requests_per_cell:.1f} requests/cell)"
     )
     logger.info(
         f"Using {optimal_limit} workers with {'high-volume' if use_high_volume else 'standard'} endpoint"
@@ -1093,8 +1133,6 @@ def estimate_memory_per_worker(sample_size=3, early_year=False):
 
         # Process a sample cell (simplified version)
         try:
-            # Use a small, representative workload
-            # This is a placeholder - in practice, you'd process an actual cell
             sample_result = process_sample_cell(early_year=early_year)
             memory_diff_mb = measure_memory_usage(before=False, cell_id=f"sample_{i}")
             memory_diff_gb = memory_diff_mb / 1024
@@ -1112,14 +1150,13 @@ def estimate_memory_per_worker(sample_size=3, early_year=False):
     # Calculate average with safety factor
     if memory_increases:
         avg_increase = sum(memory_increases) / len(memory_increases)
-        # Add 50% safety margin
-        estimated_memory = avg_increase * 1.5
+
+        estimated_memory = avg_increase * 1.2
     else:
-        # Default if measurement fails
-        estimated_memory = 0.5  # 500MB default
+        estimated_memory = 0.3  # Reduced default
 
     logger.info(f"Estimated memory per worker: {estimated_memory:.2f} GB")
-    return max(0.1, estimated_memory)  # At least 100MB
+    return max(0.1, estimated_memory)
 
 
 def calculate_optimal_cache_size(early_year):
@@ -1451,6 +1488,8 @@ def save_band_arrays(
         cell_id=cell_id,
         year=year,
     )
+    if npz_path is None:
+        logger.warning(f"No processed data was saved for {country_name} cell {cell_id}")
 
     # Clean up original files to save space
     cleanup_original_files(
@@ -1476,7 +1515,7 @@ def save_cell_metadata(
     early_year: bool,
 ) -> None:
     """
-    Save metadata for a processed cell.
+    Save comprehensive metadata for a processed cell.
 
     Args:
         country_name: Name of the country
@@ -1495,19 +1534,13 @@ def save_cell_metadata(
 
     # Check if processed data exists
     npz_path = cell_dir / "processed_data.npz"
-    if npz_path.exists():
-        # Load processed data to get array information
-        with np.load(npz_path) as data:
-            processed_data = {key: data[key] for key in data.files}
+    if not npz_path.exists():
+        logger.warning(f"No processed data found for cell {cell_id}")
+        return
 
-        # Save detailed metadata about processed data
-        save_metadata(
-            npz_path=npz_path,
-            country_name=country_name,
-            cell_id=cell_id,
-            year=year,
-            processed_data=processed_data,
-        )
+    # Load processed data to get array information
+    with np.load(npz_path) as data:
+        processed_data = {key: data[key] for key in data.files}
 
     # Get cell centroid in WGS84 for coordinates
     cell_wgs84 = cell_gdf.to_crs("EPSG:4326")
@@ -1516,16 +1549,32 @@ def save_cell_metadata(
     # Get cell bounds in original CRS
     bounds = cell_gdf.total_bounds
 
-    # Create metadata dictionary
+    # Calculate file sizes for each array
+    array_sizes = {}
+    for key, arr in processed_data.items():
+        # Calculate size in bytes (nbytes is the actual memory used)
+        size_bytes = arr.nbytes
+        array_sizes[key] = size_bytes
+
+    # Categorize the arrays
+    indices = [key for key in processed_data.keys() if key in ["ndvi", "built_up"]]
+    composites = [key for key in processed_data.keys() if key == "rgb"]
+    individual_bands = [
+        key for key in processed_data.keys() if key in ["nir", "swir1", "swir2"]
+    ]
+
+    # Create comprehensive metadata dictionary
     metadata = {
         "country": country_name,
         "cell_id": int(cell_id),
         "year": year,
         "processed_date": datetime.now().isoformat(),
-        "bands": bands,
-        "available_bands": list(band_arrays.keys()),
+        "npz_path": str(npz_path),
+        "npz_file_size_bytes": os.path.getsize(npz_path),
+        # Processing parameters
         "composite_method": composite_method,
         "cloud_threshold": cloud_threshold,
+        # Spatial information
         "coordinates": {"latitude": centroid.y, "longitude": centroid.x},
         "bounds": {
             "minx": float(bounds[0]),
@@ -1534,12 +1583,22 @@ def save_cell_metadata(
             "maxy": float(bounds[3]),
         },
         "crs": cell_gdf.crs.to_string(),
-        "band_shapes": {band: band_arrays[band].shape for band in band_arrays},
-        "band_resolutions": {
-            band: 30 if early_year else BAND_RESOLUTION.get(band, 10)
-            for band in band_arrays
+        # Content information
+        "arrays_kept": list(processed_data.keys()),
+        "indices_kept": indices,
+        "composites_kept": composites,
+        "bands_kept": individual_bands,
+        # Detailed array information
+        "arrays": {
+            name: {
+                "shape": arr.shape,
+                "dtype": str(arr.dtype),
+                "size_bytes": array_sizes.get(name, 0),
+                "min": float(np.min(arr)),
+                "max": float(np.max(arr)),
+            }
+            for name, arr in processed_data.items()
         },
-        "processed_data_path": str(npz_path) if npz_path.exists() else None,
     }
 
     # Save metadata to JSON file
@@ -1549,7 +1608,7 @@ def save_cell_metadata(
 
         json.dump(metadata, f, indent=2)
 
-    logger.info(f"Saved metadata to {metadata_file}")
+    logger.info(f"Saved comprehensive metadata to {metadata_file}")
 
 
 # Monkey patch ee.data methods to count requests
@@ -1589,3 +1648,43 @@ def setup_request_counting():
     ee.data.getDownloadId = counted_getDownloadId
 
     logger.info("Set up request counting for Earth Engine methods")
+
+
+def monitor_request_rate():
+    """Monitor the actual request rate to Earth Engine with moving average."""
+    last_count = 0
+    last_time = time.time()
+    rate_history = []
+
+    while True:
+        try:
+            current_count = sum(request_counter.counts.values())
+            current_time = time.time()
+
+            elapsed = current_time - last_time
+            requests = current_count - last_count
+
+            if elapsed > 0:
+                current_rate = requests / elapsed * 60  # requests per minute
+                rate_history.append(current_rate)
+
+                # Keep only the last 5 measurements for moving average
+                if len(rate_history) > 5:
+                    rate_history.pop(0)
+
+                avg_rate = sum(rate_history) / len(rate_history)
+
+                # Calculate percentage of Earth Engine limit
+                limit_percentage = avg_rate / 6000 * 100
+
+                logger.info(
+                    f"Earth Engine request rate: {current_rate:.1f} req/min (avg: {avg_rate:.1f}, {limit_percentage:.1f}% of limit)"
+                )
+
+            last_count = current_count
+            last_time = current_time
+
+        except Exception as e:
+            logger.error(f"Error in request rate monitoring: {e}")
+
+        time.sleep(15)
