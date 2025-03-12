@@ -196,14 +196,21 @@ def download_sentinel_for_country_year(
     """
     Download Sentinel-2 data for all cells of a specific country-year pair using optimized parallel processing.
     """
-    # Start the request rate monitoring thread
+    # Start the monitoring threads
     monitor_thread = threading.Thread(target=monitor_request_rate, daemon=True)
     monitor_thread.start()
+
+    recovery_thread = threading.Thread(
+        target=monitor_and_recover_processing, daemon=True
+    )
+    recovery_thread.start()
+
     # Initialize Earth Engine with appropriate endpoint
     initialize_earth_engine(config)
     early_year = False
     if year < 2017:
         early_year = True
+
     # Check if using high-volume endpoint
     use_high_volume = config.get("use_high_volume_endpoint", True)
 
@@ -289,9 +296,21 @@ def download_sentinel_for_country_year(
     logger.info(
         f"Processing cells in batches of {batch_size} (memory-based calculation)"
     )
+
+    # Track global progress
+    global_progress = {
+        "completed": 0,
+        "total": len(cells_to_process),
+        "last_update": time.time(),
+        "stalled_since": None,
+    }
+
+    # Variables to track request count for session refresh
+    last_request_count = sum(request_counter.counts.values())
+    last_active_time = time.time()
+
     with tqdm(
-        total=len(cells_to_process),
-        desc=f"Processing {country_name} {year}",
+        total=len(cells_to_process), desc=f"Processing {country_name} {year}"
     ) as pbar:
         # Process in batches to avoid overwhelming memory
         for batch_start in range(0, len(cells_to_process), batch_size):
@@ -303,39 +322,101 @@ def download_sentinel_for_country_year(
                 f"({len(current_batch)} cells)"
             )
 
-            # Use a ThreadPoolExecutor for better control over concurrency
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=max_workers
-            ) as executor:
-                # Submit all tasks
-                future_to_cell = {
-                    executor.submit(
-                        process_sentinel_cell_optimized,
-                        idx,
-                        cell,
-                        grid_gdf,
-                        country_name,
-                        year,
-                        bands,
-                        cloud_threshold,
-                        composite_method,
-                        country_crs,
-                        output_dir,
-                        session,
-                        early_year,
-                    ): (idx, cell)
-                    for idx, cell in current_batch
-                }
+            # Process batch with retry mechanism (simplified)
+            batch_success = False
+            for batch_attempt in range(3):  # Try up to 3 times per batch
+                if batch_attempt > 0:
+                    logger.info(f"Retry attempt {batch_attempt} for batch")
+                    # For retries, refresh the session and clear caches
+                    session = create_optimized_session(
+                        max_workers=max_workers, use_high_volume=use_high_volume
+                    )
+                    gc.collect()
 
-                # Process completed tasks as they finish
-                for future in concurrent.futures.as_completed(future_to_cell):
-                    cell_id, success = future.result()
-                    pbar.update(1)
+                try:
+                    # Use a ThreadPoolExecutor for better control over concurrency
+                    with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=max_workers
+                    ) as executor:
+                        # Submit all tasks
+                        future_to_cell = {
+                            executor.submit(
+                                process_sentinel_cell_optimized,
+                                idx,
+                                cell,
+                                grid_gdf,
+                                country_name,
+                                year,
+                                bands,
+                                cloud_threshold,
+                                composite_method,
+                                country_crs,
+                                output_dir,
+                                session,
+                                early_year,
+                            ): (idx, cell)
+                            for idx, cell in current_batch
+                        }
 
-                    if not success:
-                        logger.warning(f"Failed to process cell {cell_id}")
+                        # Process completed tasks as they finish
+                        for future in concurrent.futures.as_completed(future_to_cell):
+                            try:
+                                cell_id, success = future.result(
+                                    timeout=300
+                                )  # 5 minute timeout
+                                pbar.update(1)
+                                global_progress["completed"] += 1
+                                global_progress["last_update"] = time.time()
+                                global_progress["stalled_since"] = None
+
+                                if not success:
+                                    logger.warning(f"Failed to process cell {cell_id}")
+                            except concurrent.futures.TimeoutError:
+                                idx, cell = future_to_cell[future]
+                                cell_id = cell["cell_id"]
+                                logger.error(f"Timeout while processing cell {cell_id}")
+                                pbar.update(1)
+                                global_progress["completed"] += 1
+                                global_progress["last_update"] = time.time()
+
+                    # If we get here, batch completed successfully
+                    batch_success = True
+                    break
+
+                except Exception as e:
+                    logger.error(
+                        f"Batch processing attempt {batch_attempt+1}/3 failed: {e}"
+                    )
+                    if batch_attempt < 2:  # Try up to 3 times
+                        delay = (batch_attempt + 1) * 30
+                        logger.info(f"Retrying batch in {delay} seconds...")
+                        time.sleep(delay)
+
+            if not batch_success:
+                logger.error(f"Failed to process batch after 3 attempts")
+                # Update progress bar for skipped cells
+                pbar.update(len(current_batch))
+                global_progress["completed"] += len(current_batch)
+                global_progress["last_update"] = time.time()
+
             # Force garbage collection between batches
             gc.collect()
+
+            # Only refresh session if we've seen signs of problems
+            current_request_count = sum(request_counter.counts.values())
+            if (
+                current_request_count == last_request_count
+                and time.time() - last_active_time > 60
+            ):
+                logger.info("No activity detected, refreshing HTTP session")
+                session = create_optimized_session(
+                    max_workers=max_workers, use_high_volume=use_high_volume
+                )
+
+            # Update tracking variables
+            last_request_count = current_request_count
+            if current_request_count > last_request_count:
+                last_active_time = time.time()
 
     logger.info(f"Completed processing for {country_name}, year {year}")
 
@@ -468,6 +549,22 @@ def get_sentinel_collection_cached(
     if bands and bands != "None":
         collection = collection.select(bands)
 
+    def get_collection_size_with_timeout(collection):
+        import concurrent.futures
+        import time
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(collection.size().getInfo)
+            try:
+                return future.result(timeout=60)  # 60 second timeout
+            except concurrent.futures.TimeoutError:
+                logger.warning(
+                    f"Collection size operation timed out, returning empty collection"
+                )
+                return 0
+
+    # Use the timeout-protected function
+    count = get_collection_size_with_timeout(collection)
     return collection
 
 
@@ -1688,3 +1785,113 @@ def monitor_request_rate():
             logger.error(f"Error in request rate monitoring: {e}")
 
         time.sleep(15)
+
+
+def monitor_and_recover_processing():
+    """
+    Monitor the processing progress and recover from stalled states.
+    This function runs in a separate thread and detects when processing has stalled.
+    """
+    last_request_count = 0
+    last_active_time = time.time()
+    consecutive_stalls = 0
+
+    while True:
+        try:
+            current_count = sum(request_counter.counts.values())
+            current_time = time.time()
+
+            # Check if requests are being made
+            if current_count > last_request_count:
+                # Activity detected, reset stall counter
+                consecutive_stalls = 0
+                last_active_time = current_time
+                last_request_count = current_count
+                logger.debug(
+                    f"Processing active: {current_count - last_request_count} new requests"
+                )
+            else:
+                # No new requests detected
+                elapsed = current_time - last_active_time
+                if (
+                    elapsed > 180
+                ):  # 3 minutes with no activity (increased from 2 minutes)
+                    consecutive_stalls += 1
+                    logger.warning(
+                        f"Processing appears stalled for {elapsed:.1f} seconds (stall #{consecutive_stalls})"
+                    )
+
+                    # After multiple consecutive stalls, try recovery actions
+                    if consecutive_stalls >= 2:  # Reduced from 3
+                        logger.error(
+                            f"Processing stalled for {consecutive_stalls} consecutive checks, attempting recovery"
+                        )
+
+                        # Recovery actions (combined and simplified)
+                        try:
+                            # Clear connection pools and force GC
+                            import urllib3
+
+                            logger.info(
+                                "Clearing connection pools and forcing garbage collection"
+                            )
+                            for pool in list(urllib3.PoolManager.pools.values()):
+                                pool.clear()
+                            gc.collect(generation=2)
+
+                            # Refresh Earth Engine session
+                            logger.info("Refreshing Earth Engine session")
+                            ee.Reset()
+                            time.sleep(2)
+                            ee.Initialize(
+                                project="wealth-satellite-forecasting",
+                                opt_url="https://earthengine-highvolume.googleapis.com",
+                            )
+                            setup_request_counting()
+
+                        except Exception as e:
+                            logger.error(f"Error during recovery: {e}")
+
+                        # Reset counters after recovery attempt
+                        last_active_time = current_time
+                        consecutive_stalls = 0
+
+        except Exception as e:
+            logger.error(f"Error in monitoring thread: {e}")
+
+        time.sleep(45)  # Increased from 30 seconds to reduce overhead
+
+
+class WatchdogTimer:
+    """Watchdog timer to detect and handle hanging operations."""
+
+    def __init__(self, timeout_seconds, description):
+        self.timeout = timeout_seconds
+        self.description = description
+        self.start_time = None
+        self.timer = None
+
+    def start(self):
+        """Start the watchdog timer."""
+        self.start_time = time.time()
+        self.timer = threading.Timer(self.timeout, self._timeout_handler)
+        self.timer.daemon = True
+        self.timer.start()
+
+    def stop(self):
+        """Stop the watchdog timer."""
+        if self.timer:
+            self.timer.cancel()
+            self.timer = None
+
+    def _timeout_handler(self):
+        """Handle a timeout event."""
+        elapsed = time.time() - self.start_time
+        logger.error(
+            f"WATCHDOG: Operation '{self.description}' timed out after {elapsed:.1f} seconds"
+        )
+
+        # Log diagnostic information
+        thread_count = threading.active_count()
+        thread_names = [t.name for t in threading.enumerate()]
+        logger.error(f"WATCHDOG: {thread_count} active threads: {thread_names}")
