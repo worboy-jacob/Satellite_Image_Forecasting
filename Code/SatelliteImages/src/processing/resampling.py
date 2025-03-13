@@ -340,3 +340,258 @@ def cleanup_original_files(
         logger.warning(f"Could not remove original directory: {e}")
 
     logger.info(f"Cleaned up {deleted_count} original files for cell {cell_id}")
+
+
+def normalize_nightlights(
+    image: np.ndarray,
+    log_min: float = None,
+    log_max: float = None,
+    data_type: str = "uint8",
+) -> np.ndarray:
+    """
+    Normalize nightlight values using log transform and percentile-based scaling.
+
+    Args:
+        image: Input nightlight image
+        log_min: Minimum log-transformed value for scaling (from global stats)
+        log_max: Maximum log-transformed value for scaling (from global stats)
+        data_type: Target data type ('uint8' or 'uint16')
+
+    Returns:
+        Normalized image in the specified data type
+    """
+    if image is None:
+        return None
+
+    # Handle NaN and Inf values
+    image = np.nan_to_num(image, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Ensure all values are non-negative
+    image = np.maximum(image, 0)
+
+    # Apply log transform (log1p = log(1+x) to handle zeros)
+    log_values = np.log1p(image)
+
+    # Always use 0 as minimum (log(1+0) = 0)
+    min_val = 0
+
+    # Use provided global max or calculate from data
+    if log_max is not None:
+        max_val = log_max
+    else:
+        # Use 99th percentile as fallback
+        max_val = np.percentile(log_values, 99)  # 99th percentile
+
+    # Normalize to 0-1 range
+    normalized = (log_values - min_val) / (max_val - min_val)
+    normalized = np.clip(normalized, 0, 1)
+
+    # Scale and convert to target data type
+    if data_type == "uint8":
+        return (normalized * 255).astype(np.uint8)
+    elif data_type == "uint16":
+        return (normalized * 65535).astype(np.uint16)
+    else:
+        raise ValueError(f"Unsupported data type: {data_type}")
+
+
+def calculate_nightlight_gradient(nightlights: np.ndarray) -> np.ndarray:
+    """
+    Calculate the spatial gradient of nightlight intensity using Sobel operator.
+
+    Args:
+        nightlights: Nightlight intensity array
+
+    Returns:
+        Gradient magnitude array
+    """
+    import cv2
+
+    # Handle NaN values
+    nightlights = np.nan_to_num(nightlights, nan=0.0)
+
+    # Convert to float32 for better precision
+    nightlights_float = nightlights.astype(np.float32)
+
+    # Apply Gaussian blur to reduce noise
+    blurred = cv2.GaussianBlur(nightlights_float, (3, 3), 0)
+
+    # Calculate gradients using Sobel operator
+    grad_x = cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(blurred, cv2.CV_32F, 0, 1, ksize=3)
+
+    # Calculate gradient magnitude
+    gradient = cv2.magnitude(grad_x, grad_y)
+
+    return gradient
+
+
+def normalize_gradient(
+    gradient: np.ndarray,
+    grad_min: float = None,
+    grad_max: float = None,
+    data_type: str = "uint8",
+) -> np.ndarray:
+    """
+    Normalize gradient values using global min/max values.
+
+    Args:
+        gradient: Input gradient image
+        grad_min: Global minimum gradient value (if None, use 0)
+        grad_max: Global maximum gradient value (if None, use local 99th percentile)
+        data_type: Target data type ('uint8' or 'uint16')
+
+    Returns:
+        Normalized gradient in the specified data type
+    """
+    if gradient is None:
+        return None
+
+    # Handle NaN and Inf values
+    gradient = np.nan_to_num(gradient, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Use provided global min/max if available, otherwise use sensible defaults
+    min_val = (
+        0.0 if grad_min is None else grad_min
+    )  # Always use 0 as minimum for gradients
+
+    if grad_max is None:
+        # Only use local percentile as fallback
+        max_val = np.percentile(gradient, 99)  # 99th percentile
+    else:
+        max_val = grad_max
+
+    # Normalize to 0-1 range
+    normalized = (
+        (gradient - min_val) / (max_val - min_val)
+        if max_val > min_val
+        else np.zeros_like(gradient)
+    )
+    normalized = np.clip(normalized, 0, 1)
+
+    # Scale and convert to target data type
+    if data_type == "uint8":
+        return (normalized * 255).astype(np.uint8)
+    elif data_type == "uint16":
+        return (normalized * 65535).astype(np.uint16)
+    else:
+        raise ValueError(f"Unsupported data type: {data_type}")
+
+
+def process_and_save_viirs_bands(
+    band_arrays: Dict[str, np.ndarray],
+    output_dir: Path,
+    country_name: str,
+    cell_id: int,
+    year: int,
+) -> Path:
+    """
+    Process VIIRS bands and save as compressed NPZ file.
+
+    Args:
+        band_arrays: Dictionary of band arrays
+        output_dir: Base output directory
+        country_name: Name of the country
+        cell_id: ID of the grid cell
+        year: Year of the data
+
+    Returns:
+        Path to the saved NPZ file
+    """
+    # Create output directory
+    cell_dir = output_dir / country_name / str(year) / f"cell_{cell_id}"
+    cell_dir.mkdir(parents=True, exist_ok=True)
+
+    # Dictionary to store processed arrays
+    processed_data = {}
+
+    try:
+        # Process nightlights if available
+        avg_rad_array = None
+        if "avg_rad" in band_arrays and band_arrays["avg_rad"] is not None:
+            # Store a reference and remove from band_arrays to free memory
+            avg_rad_array = band_arrays["avg_rad"].copy()
+            band_arrays["avg_rad"] = None  # Clear original reference
+
+            # Resample to 256x256
+            resampled = resample_to_256x256(avg_rad_array)
+            del avg_rad_array  # Free memory
+            ###TODO: change to using config and this thing as a class maybe
+            # Normalize and quantize to uint8 for visualization/CNN input
+            processed_data["nightlights"] = normalize_nightlights(
+                resampled, log_min=0, log_max=4, data_type="uint8"
+            )
+
+            # Process gradient if available
+            gradient_array = None
+            if "gradient" in band_arrays and band_arrays["gradient"] is not None:
+                # Store a reference and remove from band_arrays
+                gradient_array = band_arrays["gradient"].copy()
+                band_arrays["gradient"] = None  # Clear original reference
+
+                # Resample to 256x256
+                grad_resampled = resample_to_256x256(gradient_array)
+                del gradient_array  # Free memory
+
+                # Normalize and quantize using global values
+                processed_data["gradient"] = normalize_gradient(
+                    grad_resampled,
+                    grad_min=0,
+                    grad_max=50,
+                    data_type="uint8",
+                )
+
+                # Free memory
+                del grad_resampled
+                gc.collect()
+
+            else:
+                # Calculate gradient from the resampled nightlights
+                nightlights_float = resampled.astype(np.float32)
+                gradient = calculate_nightlight_gradient(nightlights_float)
+
+                # Normalize with global values
+                processed_data["gradient"] = normalize_gradient(
+                    gradient, grad_min=0, grad_max=50, data_type="uint8"
+                )
+
+                # Free memory
+                del gradient
+                gc.collect()
+
+            # Clear resampled to free memory
+            del resampled
+            gc.collect()
+
+        # Save as compressed NPZ file
+        if processed_data:
+            npz_path = cell_dir / f"processed_data.npz"
+            np.savez_compressed(npz_path, **processed_data)
+            logger.info(f"Saved processed VIIRS data to {npz_path}")
+
+            # Clear processed_data to free memory
+            for key in list(processed_data.keys()):
+                processed_data[key] = None
+            processed_data.clear()
+
+            # Force garbage collection
+            gc.collect()
+
+            return npz_path
+        else:
+            logger.warning(f"No processed data to save for cell {cell_id}")
+            return None
+
+    except Exception as e:
+        logger.error(f"Error in process_and_save_viirs_bands: {e}")
+        logger.exception("Detailed error:")
+        return None
+    finally:
+        # Make sure to clean up memory even if an error occurs
+        for key in list(band_arrays.keys()):
+            band_arrays[key] = None
+        if "processed_data" in locals():
+            for key in list(processed_data.keys()):
+                processed_data[key] = None
+            processed_data.clear()
+        gc.collect()

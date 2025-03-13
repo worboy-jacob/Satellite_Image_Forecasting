@@ -11,6 +11,9 @@ from src.utils.config import Config
 from src.utils.paths import get_base_dir, find_shapefile, get_config_dir
 from src.grid.grid_generator import get_or_create_grid
 from src.download.sentinel import download_sentinel_for_country_year
+from src.download.viirs import download_viirs_for_country_year
+from src.download.repair_failures import repair_country_year_failures
+from src.download.repair_failures import scan_for_missing_data
 
 
 def main():
@@ -69,6 +72,52 @@ def main():
                     country_name=country_name,
                     year=year,
                     grid_gdf=grid_gdf,
+                )
+                download_viirs_for_country_year(
+                    config=config,
+                    country_name=country_name,
+                    year=year,
+                    grid_gdf=grid_gdf,
+                )
+
+                # Scan for missing data in Sentinel files
+                logger.info(
+                    f"Scanning for missing data in Sentinel files for {country_name}, year {year}"
+                )
+                scan_for_missing_data(
+                    data_type="sentinel", country_name=country_name, year=year
+                )
+
+                # Scan for missing data in VIIRS files
+                logger.info(
+                    f"Scanning for missing data in VIIRS files for {country_name}, year {year}"
+                )
+                scan_for_missing_data(
+                    data_type="viirs", country_name=country_name, year=year
+                )
+
+                # Repair any failures for Sentinel data
+                logger.info(
+                    f"Repairing any failed Sentinel data for {country_name}, year {year}"
+                )
+                repair_country_year_failures(
+                    data_type="sentinel",
+                    country_name=country_name,
+                    year=year,
+                    grid_gdf=grid_gdf,
+                    config=config,
+                )
+
+                # Repair any failures for VIIRS data
+                logger.info(
+                    f"Repairing any failed VIIRS data for {country_name}, year {year}"
+                )
+                repair_country_year_failures(
+                    data_type="viirs",
+                    country_name=country_name,
+                    year=year,
+                    grid_gdf=grid_gdf,
+                    config=config,
                 )
 
         # Log success

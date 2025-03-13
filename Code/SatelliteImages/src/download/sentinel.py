@@ -38,6 +38,8 @@ from src.processing.resampling import (
     process_and_save_bands,
     cleanup_original_files,
 )
+import json
+import traceback
 import random
 
 logger = logging.getLogger("image_processing")
@@ -62,6 +64,67 @@ BAND_RESOLUTION = {
     "B9": 60,
     "B10": 60,
 }
+
+
+class FailureLogger:
+    """Log and persist failures to a file during processing."""
+
+    def __init__(self, output_dir, country_name, year):
+        self.base_dir = output_dir
+        self.country_name = country_name
+        self.year = year
+        self.failures_dir = self.base_dir / country_name / str(year) / "failures"
+        self.failures_dir.mkdir(parents=True, exist_ok=True)
+        self.failure_log_file = self.failures_dir / "failure_log.jsonl"
+        self.lock = threading.Lock()
+
+    def log_failure(self, cell_id, error_type, error_message, details=None):
+        """Log a failure to the persistent file."""
+        with self.lock:
+            failure_record = {
+                "timestamp": datetime.now().isoformat(),
+                "country": self.country_name,
+                "year": self.year,
+                "cell_id": cell_id,
+                "error_type": error_type,
+                "error_message": str(error_message),
+                "details": details or {},
+                "traceback": traceback.format_exc(),
+            }
+
+            # Append to the file immediately
+            with open(self.failure_log_file, "a") as f:
+                f.write(json.dumps(failure_record) + "\n")
+
+            # Also create a cell-specific failure file for easy lookup
+            cell_failure_file = self.failures_dir / f"cell_{cell_id}_failure.json"
+            with open(cell_failure_file, "w") as f:
+                json.dump(failure_record, f, indent=2)
+
+            return failure_record
+
+    def get_failure_summary(self):
+        """Get a summary of all failures."""
+        if not self.failure_log_file.exists():
+            return {"total_failures": 0, "failures_by_type": {}}
+
+        failures = []
+        with open(self.failure_log_file, "r") as f:
+            for line in f:
+                try:
+                    failures.append(json.loads(line.strip()))
+                except:
+                    pass
+
+        # Count failures by type
+        failure_types = {}
+        for failure in failures:
+            error_type = failure.get("error_type", "unknown")
+            if error_type not in failure_types:
+                failure_types[error_type] = 0
+            failure_types[error_type] += 1
+
+        return {"total_failures": len(failures), "failures_by_type": failure_types}
 
 
 class RequestCounter:
@@ -196,229 +259,296 @@ def download_sentinel_for_country_year(
     """
     Download Sentinel-2 data for all cells of a specific country-year pair using optimized parallel processing.
     """
-    # Start the monitoring threads
-    monitor_thread = threading.Thread(target=monitor_request_rate, daemon=True)
-    monitor_thread.start()
-
-    recovery_thread = threading.Thread(
-        target=monitor_and_recover_processing, daemon=True
-    )
-    recovery_thread.start()
-
-    # Initialize Earth Engine with appropriate endpoint
-    initialize_earth_engine(config)
-    early_year = False
-    if year < 2017:
-        early_year = True
-
-    # Check if using high-volume endpoint
-    use_high_volume = config.get("use_high_volume_endpoint", True)
-
     # Get the output directory
     output_dir = get_results_dir() / "Images" / "Sentinel"
 
-    # Clean up any leftover processing files
-    cleanup_processing_files(output_dir, country_name, year)
+    # Initialize failure logger
+    failure_logger = FailureLogger(output_dir, country_name, year)
 
-    # Get country CRS from config
-    country_crs = None
-    for country in config.get("countries", []):
-        if country.get("name") == country_name:
-            country_crs = country.get("crs")
-            break
+    try:
+        # Start the monitoring threads
+        monitor_thread = threading.Thread(target=monitor_request_rate, daemon=True)
+        monitor_thread.start()
 
-    if not country_crs:
-        logger.error(f"No CRS defined for country {country_name}")
-        return
-
-    grid_gdf = grid_gdf.to_crs(country_crs)
-
-    # Get Sentinel-2 configuration
-    sentinel_config = config.get("sentinel", {})
-    bands = sentinel_config.get("bands", ["B2", "B3", "B4", "B8"])
-    cloud_threshold = sentinel_config.get("cloud_threshold", 20)
-    composite_method = sentinel_config.get("composite_method", "median")
-
-    # Dynamically calculate optimal parameters
-    if "memory_per_worker_gb" not in config:
-        config["memory_per_worker_gb"] = estimate_memory_per_worker(early_year)
-
-    # Calculate optimal number of workers
-    max_workers = calculate_optimal_workers(config)
-
-    # Set optimal LRU cache size
-    optimal_cache_size = calculate_optimal_cache_size(early_year=early_year)
-    update_lru_cache_size(optimal_cache_size)
-
-    logger.info(
-        f"Processing {len(grid_gdf)} cells for {country_name}, year {year} "
-        f"using up to {max_workers} workers with "
-        f"{'high-volume' if use_high_volume else 'standard'} endpoint"
-    )
-
-    # Filter out cells that have already been processed
-    cells_to_process = []
-    for idx, cell in grid_gdf.iterrows():
-        cell_id = cell["cell_id"]
-        cell_dir = output_dir / country_name / str(year) / f"cell_{cell_id}"
-        metadata_file = cell_dir / "metadata.json"
-
-        if not metadata_file.exists():
-            cells_to_process.append((idx, cell))
-
-    if not cells_to_process:
-        logger.info(
-            f"All cells for {country_name}, year {year} have already been processed"
+        recovery_thread = threading.Thread(
+            target=monitor_and_recover_processing, daemon=True
         )
-        return
+        recovery_thread.start()
 
-    logger.info(
-        f"Found {len(cells_to_process)} cells to process for {country_name}, year {year}"
-    )
+        # Initialize Earth Engine with appropriate endpoint
+        initialize_earth_engine(config)
+        early_year = False
+        if year < 2017:
+            early_year = True
 
-    # Create a shared HTTP session with dynamic parameters
-    session = create_optimized_session(
-        max_workers=max_workers, use_high_volume=use_high_volume
-    )
+        # Check if using high-volume endpoint
+        use_high_volume = config.get("use_high_volume_endpoint", True)
 
-    # Calculate optimal batch size based on memory
-    memory_per_cell_gb = config["memory_per_worker_gb"]
-    available_memory_gb = psutil.virtual_memory().available / (1024**3)
+        # Clean up any leftover processing files
+        cleanup_processing_files(output_dir, country_name, year)
 
-    # Use more of available memory for batch size calculation
-    memory_based_batch_size = max(
-        10, int((available_memory_gb * 0.9) / memory_per_cell_gb)
-    )
+        # Get country CRS from config
+        country_crs = None
+        for country in config.get("countries", []):
+            if country.get("name") == country_name:
+                country_crs = country.get("crs")
+                break
 
-    # Cap batch size at a reasonable maximum
-    batch_size = min(memory_based_batch_size, 500, len(cells_to_process))
+        if not country_crs:
+            error_msg = f"No CRS defined for country {country_name}"
+            logger.error(error_msg)
+            failure_logger.log_failure("global", "config_error", error_msg)
+            return
 
-    logger.info(
-        f"Processing cells in batches of {batch_size} (memory-based calculation)"
-    )
+        grid_gdf = grid_gdf.to_crs(country_crs)
 
-    # Track global progress
-    global_progress = {
-        "completed": 0,
-        "total": len(cells_to_process),
-        "last_update": time.time(),
-        "stalled_since": None,
-    }
+        # Get Sentinel-2 configuration
+        sentinel_config = config.get("sentinel", {})
+        bands = sentinel_config.get("bands", ["B2", "B3", "B4", "B8"])
+        cloud_threshold = sentinel_config.get("cloud_threshold", 20)
+        composite_method = sentinel_config.get("composite_method", "median")
 
-    # Variables to track request count for session refresh
-    last_request_count = sum(request_counter.counts.values())
-    last_active_time = time.time()
+        # Dynamically calculate optimal parameters
+        if "memory_per_worker_gb" not in config:
+            config["memory_per_worker_gb"] = estimate_memory_per_worker(early_year)
 
-    with tqdm(
-        total=len(cells_to_process), desc=f"Processing {country_name} {year}"
-    ) as pbar:
-        # Process in batches to avoid overwhelming memory
-        for batch_start in range(0, len(cells_to_process), batch_size):
-            batch_end = min(batch_start + batch_size, len(cells_to_process))
-            current_batch = cells_to_process[batch_start:batch_end]
+        # Calculate optimal number of workers
+        max_workers = calculate_optimal_workers(config)
 
+        # Set optimal LRU cache size
+        optimal_cache_size = calculate_optimal_cache_size(early_year=early_year)
+        update_lru_cache_size(optimal_cache_size)
+
+        logger.info(
+            f"Processing {len(grid_gdf)} cells for {country_name}, year {year} "
+            f"using up to {max_workers} workers with "
+            f"{'high-volume' if use_high_volume else 'standard'} endpoint"
+        )
+
+        # Filter out cells that have already been processed
+        cells_to_process = []
+        for idx, cell in grid_gdf.iterrows():
+            cell_id = cell["cell_id"]
+            cell_dir = output_dir / country_name / str(year) / f"cell_{cell_id}"
+            metadata_file = cell_dir / "metadata.json"
+
+            if not metadata_file.exists():
+                cells_to_process.append((idx, cell))
+
+        if not cells_to_process:
             logger.info(
-                f"Processing batch {batch_start//batch_size + 1}/{(len(cells_to_process)-1)//batch_size + 1} "
-                f"({len(current_batch)} cells)"
+                f"All cells for {country_name}, year {year} have already been processed"
             )
+            return
 
-            # Process batch with retry mechanism (simplified)
-            batch_success = False
-            for batch_attempt in range(3):  # Try up to 3 times per batch
-                if batch_attempt > 0:
-                    logger.info(f"Retry attempt {batch_attempt} for batch")
-                    # For retries, refresh the session and clear caches
+        logger.info(
+            f"Found {len(cells_to_process)} cells to process for {country_name}, year {year}"
+        )
+
+        # Create a shared HTTP session with dynamic parameters
+        session = create_optimized_session(
+            max_workers=max_workers, use_high_volume=use_high_volume
+        )
+
+        # Calculate optimal batch size based on memory
+        memory_per_cell_gb = config["memory_per_worker_gb"]
+        available_memory_gb = psutil.virtual_memory().available / (1024**3)
+
+        # Use more of available memory for batch size calculation
+        memory_based_batch_size = max(
+            10, int((available_memory_gb * 0.9) / memory_per_cell_gb)
+        )
+
+        # Cap batch size at a reasonable maximum
+        batch_size = min(memory_based_batch_size, 500, len(cells_to_process))
+
+        logger.info(
+            f"Processing cells in batches of {batch_size} (memory-based calculation)"
+        )
+
+        # Track global progress
+        global_progress = {
+            "completed": 0,
+            "total": len(cells_to_process),
+            "last_update": time.time(),
+            "stalled_since": None,
+        }
+
+        # Variables to track request count for session refresh
+        last_request_count = sum(request_counter.counts.values())
+        last_active_time = time.time()
+
+        with tqdm(
+            total=len(cells_to_process), desc=f"Processing {country_name} {year}"
+        ) as pbar:
+            # Process in batches to avoid overwhelming memory
+            for batch_start in range(0, len(cells_to_process), batch_size):
+                batch_end = min(batch_start + batch_size, len(cells_to_process))
+                current_batch = cells_to_process[batch_start:batch_end]
+
+                logger.info(
+                    f"Processing batch {batch_start//batch_size + 1}/{(len(cells_to_process)-1)//batch_size + 1} "
+                    f"({len(current_batch)} cells)"
+                )
+
+                # Process batch with retry mechanism (simplified)
+                batch_success = False
+                for batch_attempt in range(
+                    5
+                ):  # Increased from 3 to 5 attempts per batch
+                    if batch_attempt > 0:
+                        logger.info(f"Retry attempt {batch_attempt} for batch")
+                        # For retries, refresh the session and clear caches
+                        session = create_optimized_session(
+                            max_workers=max_workers, use_high_volume=use_high_volume
+                        )
+                        gc.collect()
+
+                    try:
+                        # Use a ThreadPoolExecutor for better control over concurrency
+                        with concurrent.futures.ThreadPoolExecutor(
+                            max_workers=max_workers
+                        ) as executor:
+                            # Submit all tasks
+                            future_to_cell = {
+                                executor.submit(
+                                    process_sentinel_cell_optimized,
+                                    idx,
+                                    cell,
+                                    grid_gdf,
+                                    country_name,
+                                    year,
+                                    bands,
+                                    cloud_threshold,
+                                    composite_method,
+                                    country_crs,
+                                    output_dir,
+                                    session,
+                                    early_year,
+                                    failure_logger,  # Pass the failure logger
+                                ): (idx, cell)
+                                for idx, cell in current_batch
+                            }
+
+                            # Process completed tasks as they finish
+                            for future in concurrent.futures.as_completed(
+                                future_to_cell
+                            ):
+                                try:
+                                    cell_id, success = future.result(
+                                        timeout=360  # Increased from 300 to 360 seconds
+                                    )
+                                    pbar.update(1)
+                                    global_progress["completed"] += 1
+                                    global_progress["last_update"] = time.time()
+                                    global_progress["stalled_since"] = None
+
+                                    if not success:
+                                        logger.warning(
+                                            f"Failed to process cell {cell_id}"
+                                        )
+                                except concurrent.futures.TimeoutError:
+                                    idx, cell = future_to_cell[future]
+                                    cell_id = cell["cell_id"]
+                                    error_msg = (
+                                        f"Timeout while processing cell {cell_id}"
+                                    )
+                                    logger.error(error_msg)
+                                    # Log the timeout failure
+                                    failure_logger.log_failure(
+                                        cell_id,
+                                        "timeout_error",
+                                        error_msg,
+                                        {"batch_attempt": batch_attempt},
+                                    )
+                                    pbar.update(1)
+                                    global_progress["completed"] += 1
+                                    global_progress["last_update"] = time.time()
+                                except Exception as e:
+                                    idx, cell = future_to_cell[future]
+                                    cell_id = cell["cell_id"]
+                                    error_msg = f"Unexpected error processing cell {cell_id}: {str(e)}"
+                                    logger.error(error_msg)
+                                    # Log the unexpected failure
+                                    failure_logger.log_failure(
+                                        cell_id,
+                                        "unexpected_error",
+                                        str(e),
+                                        {"batch_attempt": batch_attempt},
+                                    )
+                                    pbar.update(1)
+                                    global_progress["completed"] += 1
+                                    global_progress["last_update"] = time.time()
+
+                        # If we get here, batch completed successfully
+                        batch_success = True
+                        break
+
+                    except Exception as e:
+                        error_msg = (
+                            f"Batch processing attempt {batch_attempt+1}/5 failed: {e}"
+                        )
+                        logger.error(error_msg)
+                        # Log the batch failure
+                        failure_logger.log_failure(
+                            f"batch_{batch_start}_{batch_end}",
+                            "batch_error",
+                            str(e),
+                            {
+                                "batch_attempt": batch_attempt,
+                                "batch_start": batch_start,
+                                "batch_end": batch_end,
+                            },
+                        )
+
+                        if batch_attempt < 4:  # Try up to 5 times (0-4)
+                            delay = (
+                                batch_attempt + 1
+                            ) * 45  # Increased from 30 to 45 seconds
+                            logger.info(f"Retrying batch in {delay} seconds...")
+                            time.sleep(delay)
+
+                if not batch_success:
+                    logger.error(f"Failed to process batch after 5 attempts")
+                    # Update progress bar for skipped cells
+                    pbar.update(len(current_batch))
+                    global_progress["completed"] += len(current_batch)
+                    global_progress["last_update"] = time.time()
+
+                # Force garbage collection between batches
+                gc.collect()
+
+                # Only refresh session if we've seen signs of problems
+                current_request_count = sum(request_counter.counts.values())
+                if (
+                    current_request_count == last_request_count
+                    and time.time() - last_active_time > 60
+                ):
+                    logger.info("No activity detected, refreshing HTTP session")
                     session = create_optimized_session(
                         max_workers=max_workers, use_high_volume=use_high_volume
                     )
-                    gc.collect()
 
-                try:
-                    # Use a ThreadPoolExecutor for better control over concurrency
-                    with concurrent.futures.ThreadPoolExecutor(
-                        max_workers=max_workers
-                    ) as executor:
-                        # Submit all tasks
-                        future_to_cell = {
-                            executor.submit(
-                                process_sentinel_cell_optimized,
-                                idx,
-                                cell,
-                                grid_gdf,
-                                country_name,
-                                year,
-                                bands,
-                                cloud_threshold,
-                                composite_method,
-                                country_crs,
-                                output_dir,
-                                session,
-                                early_year,
-                            ): (idx, cell)
-                            for idx, cell in current_batch
-                        }
+                # Update tracking variables
+                last_request_count = current_request_count
+                if current_request_count > last_request_count:
+                    last_active_time = time.time()
 
-                        # Process completed tasks as they finish
-                        for future in concurrent.futures.as_completed(future_to_cell):
-                            try:
-                                cell_id, success = future.result(
-                                    timeout=300
-                                )  # 5 minute timeout
-                                pbar.update(1)
-                                global_progress["completed"] += 1
-                                global_progress["last_update"] = time.time()
-                                global_progress["stalled_since"] = None
+        # Log failure summary at the end
+        failure_summary = failure_logger.get_failure_summary()
+        logger.info(f"Failure summary: {failure_summary}")
+        logger.info(f"Completed processing for {country_name}, year {year}")
 
-                                if not success:
-                                    logger.warning(f"Failed to process cell {cell_id}")
-                            except concurrent.futures.TimeoutError:
-                                idx, cell = future_to_cell[future]
-                                cell_id = cell["cell_id"]
-                                logger.error(f"Timeout while processing cell {cell_id}")
-                                pbar.update(1)
-                                global_progress["completed"] += 1
-                                global_progress["last_update"] = time.time()
-
-                    # If we get here, batch completed successfully
-                    batch_success = True
-                    break
-
-                except Exception as e:
-                    logger.error(
-                        f"Batch processing attempt {batch_attempt+1}/3 failed: {e}"
-                    )
-                    if batch_attempt < 2:  # Try up to 3 times
-                        delay = (batch_attempt + 1) * 30
-                        logger.info(f"Retrying batch in {delay} seconds...")
-                        time.sleep(delay)
-
-            if not batch_success:
-                logger.error(f"Failed to process batch after 3 attempts")
-                # Update progress bar for skipped cells
-                pbar.update(len(current_batch))
-                global_progress["completed"] += len(current_batch)
-                global_progress["last_update"] = time.time()
-
-            # Force garbage collection between batches
-            gc.collect()
-
-            # Only refresh session if we've seen signs of problems
-            current_request_count = sum(request_counter.counts.values())
-            if (
-                current_request_count == last_request_count
-                and time.time() - last_active_time > 60
-            ):
-                logger.info("No activity detected, refreshing HTTP session")
-                session = create_optimized_session(
-                    max_workers=max_workers, use_high_volume=use_high_volume
-                )
-
-            # Update tracking variables
-            last_request_count = current_request_count
-            if current_request_count > last_request_count:
-                last_active_time = time.time()
-
-    logger.info(f"Completed processing for {country_name}, year {year}")
+    except Exception as e:
+        error_msg = f"Critical error in download_sentinel_for_country_year: {str(e)}"
+        logger.error(error_msg)
+        logger.exception("Detailed error:")
+        # Log the global failure
+        failure_logger.log_failure(
+            "global", "critical_error", str(e), {"country": country_name, "year": year}
+        )
+        # Re-raise to allow higher-level handling
+        raise
 
 
 def create_optimized_session(max_workers=None, use_high_volume=True):
@@ -440,26 +570,41 @@ def create_optimized_session(max_workers=None, use_high_volume=True):
     # Create a session
     session = requests.Session()
 
-    # Configure retry strategy based on endpoint
+    # Configure retry strategy based on endpoint - MORE AGGRESSIVE
     if use_high_volume:
         # More retries and longer backoff for high-volume endpoint
         retry_strategy = Retry(
-            total=8,  # More retries
-            backoff_factor=1.0,  # Longer backoff
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET", "POST"],
+            total=12,  # Increased from 8
+            backoff_factor=1.5,  # Increased from 1.0
+            status_forcelist=[
+                429,
+                500,
+                502,
+                503,
+                504,
+                520,
+                521,
+                522,
+                524,
+            ],  # Added more status codes
+            allowed_methods=["GET", "POST", "PUT"],  # Added PUT
+            respect_retry_after_header=True,  # Honor Retry-After headers
+            # Add jitter to prevent thundering herd
+            backoff_jitter=random.uniform(0.1, 0.5),
         )
         # Longer timeouts for high-volume endpoint
-        timeout = (15, 180)  # 30s connect, 5min read
+        timeout = (20, 240)  # Increased from 15s/180s to 20s/240s
     else:
-        # Standard endpoint settings
+        # Standard endpoint settings - also more aggressive
         retry_strategy = Retry(
-            total=5,
-            backoff_factor=0.5,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET", "POST"],
+            total=8,  # Increased from 5
+            backoff_factor=0.8,  # Increased from 0.5
+            status_forcelist=[429, 500, 502, 503, 504, 520, 521, 522],
+            allowed_methods=["GET", "POST", "PUT"],
+            respect_retry_after_header=True,
+            backoff_jitter=random.uniform(0.1, 0.3),
         )
-        timeout = (10, 120)  # 15s connect, 3min read
+        timeout = (15, 180)  # Increased from 10s/120s to 15s/180s
 
     # Calculate optimal connection pool size
     if max_workers is None:
@@ -722,14 +867,20 @@ def download_sentinel_data_optimized(
     target_crs: str = "EPSG:32628",
     session=None,
     early_year: bool = False,
+    failure_logger=None,
 ) -> Dict[str, np.ndarray]:
     """
     Optimized version of download_sentinel_data with parallel month processing.
+    Exits immediately if any month processing fails with an error.
     """
     try:
+        # Track if any month processing has failed
+        month_failure_occurred = False
+
         # Get monthly date ranges for the year
         date_ranges = get_monthly_date_ranges(year)
         month_workers = min(6, max(3, psutil.cpu_count(logical=False)))
+
         # Process months in parallel instead of sequentially
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=month_workers
@@ -738,31 +889,54 @@ def download_sentinel_data_optimized(
             def process_single_month(month_data):
                 month_idx, (start_date, end_date) = month_data
                 time.sleep(random.uniform(0.1, 0.5))
-                # Get collection for this month using optimized function
-                collection = get_sentinel_collection_optimized(
-                    grid_cell=grid_cell,
-                    start_date=start_date,
-                    end_date=end_date,
-                    cloud_threshold=cloud_threshold,
-                    bands=bands,
-                    early_year=early_year,
-                )
+                try:
+                    # Get collection for this month using optimized function
+                    collection = get_sentinel_collection_optimized(
+                        grid_cell=grid_cell,
+                        start_date=start_date,
+                        end_date=end_date,
+                        cloud_threshold=cloud_threshold,
+                        bands=bands,
+                        early_year=early_year,
+                    )
 
-                # Get the count of images for this month
-                count = collection.size().getInfo()
+                    # Get the count of images for this month
+                    count = collection.size().getInfo()
 
-                # Select top images by cloud cover if available
-                if count > 0:
-                    # Sort by cloud cover (ascending)
-                    sorted_collection = collection.sort("CLOUDY_PIXEL_PERCENTAGE")
+                    # Select top images by cloud cover if available
+                    if count > 0:
+                        # Sort by cloud cover (ascending)
+                        sorted_collection = collection.sort("CLOUDY_PIXEL_PERCENTAGE")
 
-                    # Take up to images_per_month images
-                    month_selection = sorted_collection.limit(images_per_month)
-                    month_selection_count = min(count, images_per_month)
+                        # Take up to images_per_month images
+                        month_selection = sorted_collection.limit(images_per_month)
+                        month_selection_count = min(count, images_per_month)
 
-                    return (month_idx, count, month_selection, month_selection_count)
-                else:
-                    return (month_idx, 0, None, 0)
+                        return (
+                            month_idx,
+                            count,
+                            month_selection,
+                            month_selection_count,
+                            False,  # No error occurred
+                        )
+                    else:
+                        # No images but not an error
+                        return (month_idx, 0, None, 0, False)
+                except Exception as e:
+                    if failure_logger:
+                        failure_logger.log_failure(
+                            cell_id,
+                            "month_processing_error",
+                            str(e),
+                            {
+                                "month_idx": month_idx,
+                                "start_date": start_date,
+                                "end_date": end_date,
+                            },
+                        )
+                    logger.error(f"Error processing month {month_idx+1}: {e}")
+                    # Return that an error occurred
+                    return (month_idx, 0, None, 0, True)
 
             # Submit all months for parallel processing
             month_futures = {}
@@ -782,17 +956,49 @@ def download_sentinel_data_optimized(
 
             for future in concurrent.futures.as_completed(month_futures):
                 try:
-                    month_idx, count, month_selection, month_selection_count = (
-                        future.result()
-                    )
+                    (
+                        month_idx,
+                        count,
+                        month_selection,
+                        month_selection_count,
+                        error_occurred,
+                    ) = future.result()
+
+                    # If any month processing had an error, mark for early exit
+                    if error_occurred:
+                        month_failure_occurred = True
+                        # Continue to collect all results but we'll exit after
+
                     monthly_counts[month_idx] = count
 
                     if month_selection is not None:
                         selected_collections.append(month_selection)
                         total_selected += month_selection_count
                 except Exception as e:
-                    logger.error(f"Error processing month: {e}")
+                    error_msg = f"Error processing month result: {e}"
+                    logger.error(error_msg)
+                    if failure_logger:
+                        failure_logger.log_failure(
+                            cell_id, "month_result_error", str(e), {}
+                        )
+                    month_failure_occurred = True
 
+        # If any month processing failed, log it and exit early
+        if month_failure_occurred:
+            error_msg = (
+                f"Exiting cell {cell_id} processing due to month processing failures"
+            )
+            logger.warning(error_msg)
+            if failure_logger:
+                failure_logger.log_failure(
+                    cell_id,
+                    "cell_aborted_due_to_month_failures",
+                    error_msg,
+                    {"year": year},
+                )
+            return {}
+
+        # Continue only if there were no month processing failures
         # If we have fewer than total_target images, get more from months with extras
         if total_selected < total_target:
             additional_needed = total_target - total_selected
@@ -817,30 +1023,54 @@ def download_sentinel_data_optimized(
 
                 month_num = month_idx + 1
 
-                # Get collection for this month
-                collection = get_sentinel_collection_optimized(
-                    grid_cell=grid_cell,
-                    start_date=date_ranges[month_idx][0],
-                    end_date=date_ranges[month_idx][1],
-                    cloud_threshold=cloud_threshold,
-                    bands=bands,
-                    early_year=early_year,
-                )
-
-                # Sort by cloud cover (ascending)
-                sorted_collection = collection.sort("CLOUDY_PIXEL_PERCENTAGE")
-
-                # Skip the first images_per_month images (already selected)
-                # and take up to the number needed
-                to_take = min(extras, additional_needed - additional_count)
-
-                if to_take > 0:
-                    additional = sorted_collection.toList(count).slice(
-                        images_per_month, images_per_month + to_take
+                try:
+                    # Get collection for this month
+                    collection = get_sentinel_collection_optimized(
+                        grid_cell=grid_cell,
+                        start_date=date_ranges[month_idx][0],
+                        end_date=date_ranges[month_idx][1],
+                        cloud_threshold=cloud_threshold,
+                        bands=bands,
+                        early_year=early_year,
                     )
-                    additional_collection = ee.ImageCollection(additional)
-                    additional_collections.append(additional_collection)
-                    additional_count += to_take
+
+                    # Sort by cloud cover (ascending)
+                    sorted_collection = collection.sort("CLOUDY_PIXEL_PERCENTAGE")
+
+                    # Skip the first images_per_month images (already selected)
+                    # and take up to the number needed
+                    to_take = min(extras, additional_needed - additional_count)
+
+                    if to_take > 0:
+                        additional = sorted_collection.toList(count).slice(
+                            images_per_month, images_per_month + to_take
+                        )
+                        additional_collection = ee.ImageCollection(additional)
+                        additional_collections.append(additional_collection)
+                        additional_count += to_take
+                except Exception as e:
+                    error_msg = (
+                        f"Error getting additional images for month {month_idx+1}: {e}"
+                    )
+                    logger.error(error_msg)
+                    if failure_logger:
+                        failure_logger.log_failure(
+                            cell_id,
+                            "additional_images_error",
+                            str(e),
+                            {"month_idx": month_idx, "extras": extras},
+                        )
+                    # Exit early for additional image failures too
+                    error_msg = f"Exiting cell {cell_id} processing due to additional image collection failures"
+                    logger.warning(error_msg)
+                    if failure_logger:
+                        failure_logger.log_failure(
+                            cell_id,
+                            "cell_aborted_due_to_additional_image_failures",
+                            error_msg,
+                            {"year": year, "month_idx": month_idx},
+                        )
+                    return {}
 
             # Add additional collections to selected collections
             selected_collections.extend(additional_collections)
@@ -848,6 +1078,13 @@ def download_sentinel_data_optimized(
         # Merge all selected collections
         if not selected_collections:
             logger.warning(f"No images selected for {year}")
+            if failure_logger:
+                failure_logger.log_failure(
+                    cell_id,
+                    "no_images_error",
+                    f"No images selected for {year}",
+                    {"monthly_counts": monthly_counts},
+                )
             return None
 
         merged_collection = selected_collections[0]
@@ -895,6 +1132,8 @@ def download_sentinel_data_optimized(
                     target_crs=target_crs,
                     session=session,
                     early_year=early_year,
+                    failure_logger=failure_logger,
+                    cell_id=cell_id,
                 )
                 future_to_band[future] = band
 
@@ -905,14 +1144,42 @@ def download_sentinel_data_optimized(
                     band_array = future.result()
                     if band_array is not None:
                         band_arrays[band] = band_array
+                    else:
+                        if failure_logger:
+                            failure_logger.log_failure(
+                                cell_id,
+                                "band_download_failed",
+                                f"Band {band} download returned None",
+                                {"band": band},
+                            )
                 except Exception as e:
-                    logger.error(f"Error downloading band {band}: {e}")
+                    error_msg = f"Error downloading band {band}: {e}"
+                    logger.error(error_msg)
+                    if failure_logger:
+                        failure_logger.log_failure(
+                            cell_id, "band_future_error", str(e), {"band": band}
+                        )
+
+        # If no bands were successfully downloaded, log failure and return empty
+        if not band_arrays:
+            error_msg = f"All bands failed to download for cell {cell_id}"
+            logger.error(error_msg)
+            if failure_logger:
+                failure_logger.log_failure(
+                    cell_id, "all_bands_failed", error_msg, {"bands": bands}
+                )
+            return {}
 
         return band_arrays
 
     except Exception as e:
-        logger.error(f"Error in download_sentinel_data_optimized: {e}")
+        error_msg = f"Error in download_sentinel_data_optimized: {e}"
+        logger.error(error_msg)
         logger.exception("Detailed error:")
+        if failure_logger:
+            failure_logger.log_failure(
+                cell_id, "download_data_error", str(e), {"year": year, "bands": bands}
+            )
         return {}
 
 
@@ -926,9 +1193,11 @@ def download_single_band(
     target_crs,
     session=None,
     early_year: bool = False,
+    failure_logger=None,
+    cell_id=None,
 ):
     """
-    Download a single band from Earth Engine.
+    Download a single band from Earth Engine with improved error handling.
 
     Args:
         merged_collection: The merged image collection
@@ -939,6 +1208,9 @@ def download_single_band(
         height_meters: Height in meters
         target_crs: Target CRS
         session: HTTP session to use
+        early_year: Whether this is an early year (pre-2017)
+        failure_logger: Logger for recording failures
+        cell_id: Cell ID for failure logging
 
     Returns:
         Numpy array containing the band data
@@ -960,48 +1232,93 @@ def download_single_band(
         f"Processing band {band} at {scale}m resolution, expected dimensions: {width_pixels}x{height_pixels}"
     )
 
-    # Create the composite
-    if composite_method == "median":
-        band_composite = merged_collection.select(band).median()
-    elif composite_method == "mean":
-        band_composite = merged_collection.select(band).mean()
-    else:
-        band_composite = merged_collection.select(band).median()
+    try:
+        # Create the composite
+        if composite_method == "median":
+            band_composite = merged_collection.select(band).median()
+        elif composite_method == "mean":
+            band_composite = merged_collection.select(band).mean()
+        else:
+            band_composite = merged_collection.select(band).median()
 
-    # Get download URL with explicit dimensions
-    url = band_composite.getDownloadURL(
-        {
-            "region": region,  # WGS84 region
-            "dimensions": f"{width_pixels}x{height_pixels}",  # Explicit pixel dimensions
-            "format": "GEO_TIFF",
-            "crs": target_crs,  # Output in UTM
-        }
-    )
+        # Get download URL with explicit dimensions
+        url = band_composite.getDownloadURL(
+            {
+                "region": region,  # WGS84 region
+                "dimensions": f"{width_pixels}x{height_pixels}",  # Explicit pixel dimensions
+                "format": "GEO_TIFF",
+                "crs": target_crs,  # Output in UTM
+            }
+        )
+    except Exception as e:
+        error_msg = f"Error preparing download for band {band}: {str(e)}"
+        logger.error(error_msg)
+        if failure_logger and cell_id:
+            failure_logger.log_failure(
+                cell_id,
+                "band_preparation_error",
+                str(e),
+                {
+                    "band": band,
+                    "width_pixels": width_pixels,
+                    "height_pixels": height_pixels,
+                },
+            )
+        return None
 
     # Use the provided session or create a new one
     if session is None:
         session = requests
 
-    # Download with retries
-    max_retries = 5
+    # Download with retries - more aggressive retry strategy
+    max_retries = 8  # Increased from 5
     retry_delay = 2
+    tmp_path = None
 
     for attempt in range(max_retries):
         try:
-            response = session.get(url, timeout=300)  # 5-minute timeout
+            # Add jitter to retry delay to prevent thundering herd
+            jitter = random.uniform(0.8, 1.2)
+            actual_delay = retry_delay * jitter
+
+            # Add timeout with exponential increase for later attempts
+            timeout = min(300 + attempt * 60, 600)  # Start at 5 min, max 10 min
+
+            logger.debug(
+                f"Download attempt {attempt+1}/{max_retries} for band {band}, timeout={timeout}s"
+            )
+            response = session.get(url, timeout=timeout)
 
             if response.status_code != 200:
-                if attempt < max_retries - 1:
-                    logger.warning(
-                        f"Failed to download band {band}: HTTP {response.status_code}, retrying in {retry_delay}s"
+                error_msg = (
+                    f"Failed to download band {band}: HTTP {response.status_code}"
+                )
+                logger.warning(error_msg)
+
+                if failure_logger and cell_id:
+                    failure_logger.log_failure(
+                        cell_id,
+                        "band_download_http_error",
+                        error_msg,
+                        {
+                            "band": band,
+                            "attempt": attempt + 1,
+                            "status_code": response.status_code,
+                            "response_text": (
+                                response.text[:1000]
+                                if hasattr(response, "text")
+                                else "N/A"
+                            ),
+                        },
                     )
-                    time.sleep(retry_delay)
+
+                if attempt < max_retries - 1:
+                    logger.warning(f"Retrying in {actual_delay:.1f}s")
+                    time.sleep(actual_delay)
                     retry_delay *= 2  # Exponential backoff
                     continue
                 else:
-                    logger.error(
-                        f"Failed to download band {band}: HTTP {response.status_code}"
-                    )
+                    logger.error(f"Max retries reached for band {band}")
                     return None
 
             # Save to a temporary file
@@ -1016,27 +1333,52 @@ def download_single_band(
 
                 # Verify we got the expected resolution
                 if band_array.shape[0] < 10 or band_array.shape[1] < 10:
-                    logger.error(
-                        f"Band {band} has unexpectedly low resolution: {band_array.shape}"
-                    )
+                    error_msg = f"Band {band} has unexpectedly low resolution: {band_array.shape}"
+                    logger.error(error_msg)
+
+                    if failure_logger and cell_id:
+                        failure_logger.log_failure(
+                            cell_id,
+                            "band_resolution_error",
+                            error_msg,
+                            {"band": band, "shape": band_array.shape},
+                        )
+
                     os.unlink(tmp_path)
                     return None
 
             # Remove the temporary file
             os.unlink(tmp_path)
+            tmp_path = None
 
             return band_array
 
         except Exception as e:
-            if attempt < max_retries - 1:
-                logger.warning(
-                    f"Error downloading band {band}, attempt {attempt+1}/{max_retries}: {e}"
+            error_msg = f"Error downloading band {band}, attempt {attempt+1}/{max_retries}: {str(e)}"
+            logger.warning(error_msg)
+
+            if failure_logger and cell_id:
+                failure_logger.log_failure(
+                    cell_id,
+                    "band_download_error",
+                    str(e),
+                    {"band": band, "attempt": attempt + 1},
                 )
-                time.sleep(retry_delay)
+
+            # Clean up temporary file if it exists
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                    tmp_path = None
+                except:
+                    pass
+
+            if attempt < max_retries - 1:
+                time.sleep(actual_delay)
                 retry_delay *= 2  # Exponential backoff
             else:
                 logger.error(
-                    f"Failed to download band {band} after {max_retries} attempts: {e}"
+                    f"Failed to download band {band} after {max_retries} attempts"
                 )
                 return None
 
@@ -1795,6 +2137,7 @@ def monitor_and_recover_processing():
     last_request_count = 0
     last_active_time = time.time()
     consecutive_stalls = 0
+    recovery_attempts = 0
 
     while True:
         try:
@@ -1814,30 +2157,49 @@ def monitor_and_recover_processing():
                 # No new requests detected
                 elapsed = current_time - last_active_time
                 if (
-                    elapsed > 180
-                ):  # 3 minutes with no activity (increased from 2 minutes)
+                    elapsed > 150
+                ):  # Reduced from 180 to 150 seconds for faster detection
                     consecutive_stalls += 1
                     logger.warning(
                         f"Processing appears stalled for {elapsed:.1f} seconds (stall #{consecutive_stalls})"
                     )
 
                     # After multiple consecutive stalls, try recovery actions
-                    if consecutive_stalls >= 2:  # Reduced from 3
+                    if consecutive_stalls >= 2:  # Kept at 2
+                        recovery_attempts += 1
                         logger.error(
-                            f"Processing stalled for {consecutive_stalls} consecutive checks, attempting recovery"
+                            f"Processing stalled for {consecutive_stalls} consecutive checks, "
+                            f"attempting recovery (attempt #{recovery_attempts})"
                         )
 
-                        # Recovery actions (combined and simplified)
                         try:
-                            # Clear connection pools and force GC
-                            import urllib3
+                            # Force garbage collection
+                            logger.info("Forcing garbage collection")
+                            gc.collect(generation=2)
 
-                            logger.info(
-                                "Clearing connection pools and forcing garbage collection"
-                            )
+                            import urllib3
+                            import requests
+                            from requests.adapters import HTTPAdapter
+
+                            logger.info("Clearing connection pools")
+                            # Clear connection pools
                             for pool in list(urllib3.PoolManager.pools.values()):
                                 pool.clear()
-                            gc.collect(generation=2)
+
+                            # More aggressive recovery for later attempts
+                            if recovery_attempts > 1:
+                                logger.info("Performing more aggressive recovery")
+                                # Clear all caches
+                                if hasattr(
+                                    get_sentinel_collection_cached, "cache_clear"
+                                ):
+                                    get_sentinel_collection_cached.cache_clear()
+
+                                # Reset memory state
+                                gc.collect(generation=2)
+
+                                # Brief pause to let system recover
+                                time.sleep(5)
 
                             # Refresh Earth Engine session
                             logger.info("Refreshing Earth Engine session")
@@ -1851,15 +2213,17 @@ def monitor_and_recover_processing():
 
                         except Exception as e:
                             logger.error(f"Error during recovery: {e}")
+                            logger.exception("Recovery error details:")
 
-                        # Reset counters after recovery attempt
+                        # Reset stall counter but not recovery attempts
+                        # This way we can track how many times we've had to recover
                         last_active_time = current_time
                         consecutive_stalls = 0
 
         except Exception as e:
             logger.error(f"Error in monitoring thread: {e}")
 
-        time.sleep(45)  # Increased from 30 seconds to reduce overhead
+        time.sleep(45)  # Kept at 45 seconds
 
 
 class WatchdogTimer:
