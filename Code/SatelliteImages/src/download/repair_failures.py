@@ -46,7 +46,18 @@ logging.basicConfig(
     handlers=[logging.FileHandler("repair_failures.log"), logging.StreamHandler()],
 )
 
+# Configure logging only if not already configured
 logger = logging.getLogger("repair_tool")
+if not logger.handlers:
+    file_handler = logging.FileHandler("repair_failures.log")
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    )
+    logger.addHandler(file_handler)
+
+    # Don't add a StreamHandler here since the root logger will handle console output
+    logger.setLevel(logging.INFO)
+    logger.propagate = True  # Allow messages to propagate to the root logger
 
 # Constants
 BAND_RESOLUTION = {

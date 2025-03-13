@@ -658,13 +658,6 @@ def download_viirs_for_country_year(
 def create_optimized_session(max_workers=None, use_high_volume=True):
     """
     Create an optimized requests session with connection pooling based on system capabilities.
-
-    Args:
-        max_workers: Number of workers that will use this session
-        use_high_volume: Whether the high-volume endpoint is being used
-
-    Returns:
-        requests.Session: Optimized session
     """
     import requests
     from requests.adapters import HTTPAdapter
@@ -674,45 +667,30 @@ def create_optimized_session(max_workers=None, use_high_volume=True):
     # Create a session
     session = requests.Session()
 
-    # Configure retry strategy based on endpoint - MORE AGGRESSIVE
+    # Configure retry strategy based on endpoint
     if use_high_volume:
-        # More retries and longer backoff for high-volume endpoint
         retry_strategy = Retry(
-            total=12,  # Increased from 8
-            backoff_factor=1.5,  # Increased from 1.0
-            status_forcelist=[
-                429,
-                500,
-                502,
-                503,
-                504,
-                520,
-                521,
-                522,
-                524,
-            ],  # Added more status codes
-            allowed_methods=["GET", "POST", "PUT"],  # Added PUT
-            respect_retry_after_header=True,  # Honor Retry-After headers
-            # Add jitter to prevent thundering herd
+            total=12,
+            backoff_factor=1.5,
+            status_forcelist=[429, 500, 502, 503, 504, 520, 521, 522, 524],
+            allowed_methods=["GET", "POST", "PUT"],
+            respect_retry_after_header=True,
             backoff_jitter=random.uniform(0.1, 0.5),
         )
-        # Longer timeouts for high-volume endpoint
-        timeout = (20, 240)  # Increased from 15s/180s to 20s/240s
+        timeout = (20, 240)
     else:
-        # Standard endpoint settings - also more aggressive
         retry_strategy = Retry(
-            total=8,  # Increased from 5
-            backoff_factor=0.8,  # Increased from 0.5
+            total=8,
+            backoff_factor=0.8,
             status_forcelist=[429, 500, 502, 503, 504, 520, 521, 522],
             allowed_methods=["GET", "POST", "PUT"],
             respect_retry_after_header=True,
             backoff_jitter=random.uniform(0.1, 0.3),
         )
-        timeout = (15, 180)  # Increased from 10s/120s to 15s/180s
+        timeout = (15, 180)
 
     # Calculate optimal connection pool size
     if max_workers is None:
-        # Estimate based on CPU count
         cpu_count = psutil.cpu_count(logical=True)
         max_workers = cpu_count * 2
 
@@ -720,16 +698,18 @@ def create_optimized_session(max_workers=None, use_high_volume=True):
     connections_per_worker = 4 if use_high_volume else 3
 
     # Calculate pool sizes with a minimum and maximum
-    pool_connections = min(max(20, max_workers), 150 if use_high_volume else 100)
+    # IMPORTANT: These values need to be larger to avoid connection pool exhaustion
+    pool_connections = min(max(50, max_workers * 2), 200 if use_high_volume else 150)
     pool_maxsize = min(
-        max(50, max_workers * connections_per_worker), 300 if use_high_volume else 200
+        max(100, max_workers * connections_per_worker * 2),
+        400 if use_high_volume else 300,
     )
 
     logger.info(
         f"HTTP connection pool: connections={pool_connections}, max_size={pool_maxsize}"
     )
 
-    # Configure connection pooling
+    # Configure the adapter with our calculated pool sizes
     adapter = HTTPAdapter(
         pool_connections=pool_connections,
         pool_maxsize=pool_maxsize,
@@ -1794,6 +1774,8 @@ def calculate_optimal_workers(config):
     requests_per_cell = max(avg_requests, 8) if avg_requests > 0 else 8
     rate_multiplier = 3.0 if use_high_volume else 2.5
     rate_limited_workers = int((ee_rate_limit / requests_per_cell) * rate_multiplier)
+    if use_high_volume:
+        rate_limited_workers = min(rate_limited_workers, 35)
 
     # CPU-based limit - more aggressive for I/O bound workloads
     cpu_count = psutil.cpu_count(logical=True)
