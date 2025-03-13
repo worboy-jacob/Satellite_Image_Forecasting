@@ -400,6 +400,7 @@ def repair_sentinel_cell_failure(
     grid_gdf: gpd.GeoDataFrame,
     target_crs: str,
     repair_logger: RepairFailureLogger,
+    session: requests.Session,
     early_year: bool = False,
     composite_method: str = "median",
     cloud_threshold: int = 20,
@@ -432,9 +433,6 @@ def repair_sentinel_cell_failure(
                 bands = ["B02", "B03", "B04", "B08"]  # HLS bands
             else:
                 bands = ["B2", "B3", "B4", "B8"]  # Sentinel-2 bands
-
-        # Create HTTP session
-        session = create_optimized_session(max_workers=5)
 
         # Get the cell data
         cell_gdf = get_cell_grid_data(grid_gdf, cell_id)
@@ -955,6 +953,7 @@ def repair_viirs_cell_failure(
     country_name: str,
     grid_gdf: gpd.GeoDataFrame,
     target_crs: str,
+    session: requests.Session,
     repair_logger: RepairFailureLogger,
     composite_method: str = "median",
     bands: Optional[List[str]] = None,
@@ -983,9 +982,6 @@ def repair_viirs_cell_failure(
         # Default bands if not specified
         if bands is None:
             bands = ["avg_rad"]  # Default VIIRS band
-
-        # Create HTTP session
-        session = create_optimized_session(max_workers=5)
 
         # Get the cell data
         cell_gdf = get_cell_grid_data(grid_gdf, cell_id)
@@ -1426,25 +1422,7 @@ def repair_country_year_failures(
     try:
         ee.Image(1).getInfo()
     except:
-        logger.info("Initializing Earth Engine")
-        # Use high-volume endpoint for repair operations
-        use_high_volume = config.get("use_high_volume_endpoint", True)
-        project_id = config.get("project_id", "wealth-satellite-forecasting")
-
-        try:
-            if use_high_volume:
-                ee.Initialize(
-                    project=project_id,
-                    opt_url="https://earthengine-highvolume.googleapis.com",
-                )
-            else:
-                ee.Initialize(project=project_id)
-        except Exception as e:
-            logger.error(f"Failed to initialize Earth Engine: {e}")
-            return {
-                "status": "error",
-                "message": f"Earth Engine initialization failed: {e}",
-            }
+        initialize_earth_engine()
 
     # Get output directory
     output_dir = get_results_dir() / "Images" / data_type.capitalize()
