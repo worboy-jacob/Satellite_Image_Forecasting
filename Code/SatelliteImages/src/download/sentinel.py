@@ -842,7 +842,6 @@ def process_sentinel_cell_optimized(
                 cloud_threshold=cloud_threshold,
                 band_arrays=band_arrays,
                 early_year=early_year,
-                failure_logger=failure_logger,  # Pass the failure logger
             )
         except Exception as e:
             error_msg = f"Error saving metadata for cell {cell_id}: {str(e)}"

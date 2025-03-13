@@ -911,7 +911,6 @@ def process_viirs_cell_optimized(
                 output_dir=output_dir,
                 composite_method=composite_method,
                 band_arrays=band_arrays,
-                failure_logger=failure_logger,  # Pass the failure logger
             )
         except Exception as e:
             error_msg = f"Error saving metadata for cell {cell_id}: {str(e)}"
