@@ -1620,6 +1620,16 @@ def repair_country_year_failures(
 
                 # Record result
                 if success:
+                    # Remove the cell from the failure log
+                    remove_cell_from_failure_log(data_type, country_name, year, cell_id)
+                    logger.info(f"Successfully repaired cell {cell_id}")
+                    repair_logger.log_repair_attempt(
+                        cell_id,
+                        "cell_repair",
+                        "",
+                        f"Cell repair successful",
+                        "success",
+                    )
                     type_results["successful_repairs"] += 1
                     type_results["cells"][str(cell_id)] = {"status": "repaired"}
                 else:
@@ -1852,3 +1862,74 @@ def scan_for_missing_data(
     logger.info(
         f"Scanning complete. Found {failures_count} new cells with missing or invalid data. Skipped {skipped_count} cells with existing failure logs."
     )
+
+
+def remove_cell_from_failure_log(
+    data_type: str, country_name: str, year: int, cell_id: int
+) -> bool:
+    """
+    Remove all entries for a specific cell from the failure log.
+
+    Args:
+        data_type: Either 'sentinel' or 'viirs'
+        country_name: Name of the country
+        year: Year of the data
+        cell_id: ID of the cell to remove from failure log
+
+    Returns:
+        True if entries were removed, False otherwise
+    """
+    logger.info(
+        f"Removing cell {cell_id} from {data_type} failure log for {country_name} {year}"
+    )
+
+    # Get failure log path
+    failures_dir = (
+        get_results_dir()
+        / "Images"
+        / data_type.capitalize()
+        / country_name
+        / str(year)
+        / "failures"
+    )
+    failure_log_file = failures_dir / "failure_log.jsonl"
+
+    if not failure_log_file.exists():
+        logger.warning(f"No failure log file found: {failure_log_file}")
+        return False
+
+    # Read all entries, keeping only those that don't match the cell_id
+    kept_entries = []
+    removed_count = 0
+
+    with open(failure_log_file, "r") as f:
+        for line in f:
+            try:
+                entry = json.loads(line.strip())
+                entry_cell_id = entry.get("cell_id")
+
+                # Convert string cell_id to int if needed
+                if isinstance(entry_cell_id, str) and entry_cell_id.isdigit():
+                    entry_cell_id = int(entry_cell_id)
+
+                # Keep entries that don't match our cell_id
+                if entry_cell_id != cell_id:
+                    kept_entries.append(line)
+                else:
+                    removed_count += 1
+            except json.JSONDecodeError:
+                # Keep lines we can't parse
+                kept_entries.append(line)
+
+    # Only rewrite the file if we removed something
+    if removed_count > 0:
+        with open(failure_log_file, "w") as f:
+            f.writelines(kept_entries)
+
+        logger.info(
+            f"Removed {removed_count} entries for cell {cell_id} from failure log"
+        )
+        return True
+
+    logger.info(f"No entries found for cell {cell_id} in failure log")
+    return False

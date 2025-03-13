@@ -14,6 +14,7 @@ from src.download.sentinel import download_sentinel_for_country_year
 from src.download.viirs import download_viirs_for_country_year
 from src.download.repair_failures import repair_country_year_failures
 from src.download.repair_failures import scan_for_missing_data
+from src.fusion.data_fusion import combine_sentinel_viirs_data, DataIntegrityChecker
 
 
 def main():
@@ -123,17 +124,57 @@ def main():
                 logger.info(
                     f"Scanning for missing data again in Sentinel files for {country_name}, year {year}"
                 )
-                scan_for_missing_data(
-                    data_type="sentinel", country_name=country_name, year=year
-                )
+        # Run comprehensive data integrity check across all processed data
+        logger.info("Running comprehensive data integrity check for all processed data")
+        checker = DataIntegrityChecker(
+            countries=[country["name"] for country in countries],
+            years=list(
+                set(year for country in countries for year in country.get("years", []))
+            ),
+            max_workers=config.get("max_workers", 4),
+        )
 
-                # Scan for missing data in VIIRS files
-                logger.info(
-                    f"Scanning for missing data again in VIIRS files for {country_name}, year {year}"
-                )
-                scan_for_missing_data(
-                    data_type="viirs", country_name=country_name, year=year
-                )
+        # Run the check and get results
+        integrity_results = checker.check_all_data()
+
+        # Log summary of integrity results
+        sentinel_total = integrity_results["sentinel"]["total_cells"]
+        sentinel_issues = (
+            integrity_results["sentinel"]["cells_with_missing_bands"]
+            + integrity_results["sentinel"]["cells_with_empty_arrays"]
+            + integrity_results["sentinel"]["cells_with_errors"]
+        )
+
+        viirs_total = integrity_results["viirs"]["total_cells"]
+        viirs_issues = (
+            integrity_results["viirs"]["cells_with_missing_bands"]
+            + integrity_results["viirs"]["cells_with_empty_arrays"]
+            + integrity_results["viirs"]["cells_with_errors"]
+        )
+
+        matching_percent = 0
+        if integrity_results["matching"]["total_cells"] > 0:
+            matching_percent = (
+                integrity_results["matching"]["matching_cells"]
+                / integrity_results["matching"]["total_cells"]
+                * 100
+            )
+
+        logger.info(f"Data integrity check complete:")
+        logger.info(
+            f"Sentinel: {sentinel_issues}/{sentinel_total} cells have issues ({sentinel_issues/max(1, sentinel_total)*100:.1f}%)"
+        )
+        logger.info(
+            f"VIIRS: {viirs_issues}/{viirs_total} cells have issues ({viirs_issues/max(1, viirs_total)*100:.1f}%)"
+        )
+        logger.info(
+            f"Matching: {integrity_results['matching']['matching_cells']}/{integrity_results['matching']['total_cells']} cells match ({matching_percent:.1f}%)"
+        )
+        logger.info(f"Detailed reports saved to {checker.output_dir}")
+        # Combine Sentinel and VIIRS data after repairs and scans
+        logger.info(
+            f"Combining Sentinel and VIIRS data for {country_name}, year {year}"
+        )
 
         # Log success
         logger.info("Pipeline execution completed successfully")
