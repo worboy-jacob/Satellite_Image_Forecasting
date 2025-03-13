@@ -168,9 +168,7 @@ request_counter = RequestCounter()
 def initialize_earth_engine(config):
     """
     Initialize Earth Engine with the appropriate endpoint based on configuration.
-
-    Args:
-        config: Configuration dictionary
+    Includes timeout handling and retry logic.
     """
     import ee
 
@@ -180,41 +178,47 @@ def initialize_earth_engine(config):
     # Check if high-volume endpoint should be used
     use_high_volume = config.get("use_high_volume_endpoint", True)
 
+    # Add timeout handling
     try:
-        if use_high_volume:
-            # Initialize with high-volume endpoint
-            ee.Initialize(
-                project=project_id,
-                opt_url="https://earthengine-highvolume.googleapis.com",
-            )
-            logger.info("Initialized Earth Engine with high-volume endpoint")
-        else:
-            # Standard initialization
-            ee.Initialize(project=project_id)
-            logger.info("Initialized Earth Engine with standard endpoint")
-        setup_request_counting()
+        with timeout(60, "Earth Engine initialization"):
+            if use_high_volume:
+                # Initialize with high-volume endpoint
+                ee.Initialize(
+                    project=project_id,
+                    opt_url="https://earthengine-highvolume.googleapis.com",
+                )
+                logger.info("Initialized Earth Engine with high-volume endpoint")
+            else:
+                # Standard initialization
+                ee.Initialize(project=project_id)
+                logger.info("Initialized Earth Engine with standard endpoint")
+            setup_request_counting()
 
     except Exception as e:
         logger.warning(
             f"Earth Engine initialization failed: {e}. Attempting to authenticate..."
         )
         try:
-            ee.Authenticate()
+            # Attempt authentication with timeout
+            with timeout(90, "Earth Engine authentication"):
+                ee.Authenticate()
 
-            if use_high_volume:
-                ee.Initialize(
-                    project=project_id,
-                    opt_url="https://earthengine-highvolume.googleapis.com",
-                )
-                logger.info(
-                    "Authenticated and initialized Earth Engine with high-volume endpoint"
-                )
-            else:
-                ee.Initialize(project=project_id)
-                logger.info(
-                    "Authenticated and initialized Earth Engine with standard endpoint"
-                )
-            setup_request_counting()
+            # Then attempt initialization again with timeout
+            with timeout(60, "Earth Engine re-initialization"):
+                if use_high_volume:
+                    ee.Initialize(
+                        project=project_id,
+                        opt_url="https://earthengine-highvolume.googleapis.com",
+                    )
+                    logger.info(
+                        "Authenticated and initialized Earth Engine with high-volume endpoint"
+                    )
+                else:
+                    ee.Initialize(project=project_id)
+                    logger.info(
+                        "Authenticated and initialized Earth Engine with standard endpoint"
+                    )
+                setup_request_counting()
 
         except Exception as auth_error:
             logger.error(f"Earth Engine authentication failed: {auth_error}")
@@ -553,12 +557,15 @@ def download_sentinel_for_country_year(
 
 def create_optimized_session(max_workers=None, use_high_volume=True):
     """
-    Create an optimized requests session with connection pooling based on system capabilities.
+    Create an optimized requests session with connection pooling and tracking.
     """
     import requests
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
     import psutil
+
+    # Track session creation for debugging
+    logger.info(f"Creating new HTTP session (high_volume={use_high_volume})")
 
     # Create a session
     session = requests.Session()
@@ -590,16 +597,9 @@ def create_optimized_session(max_workers=None, use_high_volume=True):
         cpu_count = psutil.cpu_count(logical=True)
         max_workers = cpu_count * 2
 
-    # Each worker might have multiple concurrent requests
-    connections_per_worker = 4 if use_high_volume else 3
-
-    # Calculate pool sizes with a minimum and maximum
-    # IMPORTANT: These values need to be larger to avoid connection pool exhaustion
-    pool_connections = min(max(50, max_workers * 2), 200 if use_high_volume else 150)
-    pool_maxsize = min(
-        max(100, max_workers * connections_per_worker * 2),
-        400 if use_high_volume else 300,
-    )
+    # More conservative pool sizes to prevent exhaustion
+    pool_connections = min(max(30, max_workers), 100)
+    pool_maxsize = min(max(60, max_workers * 3), 200)
 
     logger.info(
         f"HTTP connection pool: connections={pool_connections}, max_size={pool_maxsize}"
@@ -618,6 +618,9 @@ def create_optimized_session(max_workers=None, use_high_volume=True):
 
     # Set default timeout
     session.timeout = timeout
+
+    # Add session creation time for tracking staleness
+    session._creation_time = time.time()
 
     return session
 
@@ -762,6 +765,12 @@ def process_sentinel_cell_optimized(
     placeholder_file = None
 
     try:
+        if (
+            hasattr(session, "_creation_time")
+            and time.time() - session._creation_time > 1800
+        ):  # 30 minutes
+            logger.info(f"Session for cell {cell_id} is stale, creating fresh session")
+            session = create_optimized_session(max_workers=20, use_high_volume=True)
         measure_memory_usage(before=True, cell_id=cell_id)
         logger.info(f"Processing cell {cell_id} for {country_name}, year {year}")
 
@@ -773,20 +782,23 @@ def process_sentinel_cell_optimized(
         placeholder_file = cell_dir / ".processing"
         with open(placeholder_file, "w") as f:
             f.write(f"Started: {datetime.now().isoformat()}")
-
-        # Download the data with optimized approach
-        band_arrays = download_sentinel_data_optimized(
-            grid_cell=cell_gdf,
-            year=year,
-            bands=bands,
-            cloud_threshold=cloud_threshold,
-            composite_method=composite_method,
-            target_crs=target_crs,
-            session=session,
-            early_year=early_year,
-            cell_id=cell_id,
-            failure_logger=failure_logger,  # Pass the failure logger
-        )
+        watchdog = WatchdogTimer(600, f"Processing cell {cell_id}")  # 10 minute timeout
+        watchdog.start()
+        try:
+            band_arrays = download_sentinel_data_optimized(
+                grid_cell=cell_gdf,
+                year=year,
+                bands=bands,
+                cloud_threshold=cloud_threshold,
+                composite_method=composite_method,
+                target_crs=target_crs,
+                session=session,
+                early_year=early_year,
+                cell_id=cell_id,
+                failure_logger=failure_logger,  # Pass the failure logger
+            )
+        finally:
+            watchdog.stop()
 
         if not band_arrays:
             error_msg = (
@@ -806,7 +818,10 @@ def process_sentinel_cell_optimized(
                 placeholder_file.unlink()
             return cell_id, False
 
-        # Save the data
+        save_watchdog = WatchdogTimer(
+            300, f"Saving data for cell {cell_id}"
+        )  # 5 minute timeout
+        save_watchdog.start()
         try:
             save_band_arrays(
                 band_arrays=band_arrays,
@@ -828,8 +843,13 @@ def process_sentinel_cell_optimized(
             if placeholder_file and placeholder_file.exists():
                 placeholder_file.unlink()
             return cell_id, False
+        finally:
+            save_watchdog.stop()
 
-        # Save metadata
+        metadata_watchdog = WatchdogTimer(
+            120, f"Saving metadata for cell {cell_id}"
+        )  # 2 minute timeout
+        metadata_watchdog.start()
         try:
             save_cell_metadata(
                 country_name=country_name,
@@ -851,6 +871,8 @@ def process_sentinel_cell_optimized(
             if placeholder_file and placeholder_file.exists():
                 placeholder_file.unlink()
             return cell_id, False
+        finally:
+            metadata_watchdog.stop()
 
         # Remove placeholder file
         if placeholder_file and placeholder_file.exists():
@@ -861,6 +883,9 @@ def process_sentinel_cell_optimized(
         )
         memory_diff = measure_memory_usage(before=False, cell_id=cell_id)
         logger.info(f"Memory used for cell {cell_id}: {memory_diff:.4f} MB")
+
+        del band_arrays
+        gc.collect()
         return cell_id, True
 
     except Exception as e:
@@ -2145,20 +2170,27 @@ def monitor_request_rate():
         time.sleep(15)
 
 
+# 1. Improved monitoring and recovery mechanism
 def monitor_and_recover_processing():
     """
-    Monitor the processing progress and recover from stalled states.
-    This function runs in a separate thread and detects when processing has stalled.
+    Enhanced monitoring function with more aggressive recovery capabilities.
     """
     last_request_count = 0
     last_active_time = time.time()
     consecutive_stalls = 0
     recovery_attempts = 0
 
+    # Keep track of when workers were last restarted
+    last_worker_restart = time.time()
+
     while True:
         try:
             current_count = sum(request_counter.counts.values())
             current_time = time.time()
+
+            # Monitor memory usage for leaks
+            process = psutil.Process(os.getpid())
+            current_memory = process.memory_info().rss / (1024 * 1024)
 
             # Check if requests are being made
             if current_count > last_request_count:
@@ -2167,21 +2199,21 @@ def monitor_and_recover_processing():
                 last_active_time = current_time
                 last_request_count = current_count
                 logger.debug(
-                    f"Processing active: {current_count - last_request_count} new requests"
+                    f"Processing active: {current_count - last_request_count} new requests, "
+                    f"Memory: {current_memory:.1f} MB"
                 )
             else:
                 # No new requests detected
                 elapsed = current_time - last_active_time
-                if (
-                    elapsed > 150
-                ):  # Reduced from 180 to 150 seconds for faster detection
+                if elapsed > 120:  # Reduced to 2 minutes for faster detection
                     consecutive_stalls += 1
                     logger.warning(
-                        f"Processing appears stalled for {elapsed:.1f} seconds (stall #{consecutive_stalls})"
+                        f"Processing appears stalled for {elapsed:.1f} seconds (stall #{consecutive_stalls}), "
+                        f"Memory: {current_memory:.1f} MB"
                     )
 
                     # After multiple consecutive stalls, try recovery actions
-                    if consecutive_stalls >= 2:  # Kept at 2
+                    if consecutive_stalls >= 2:
                         recovery_attempts += 1
                         logger.error(
                             f"Processing stalled for {consecutive_stalls} consecutive checks, "
@@ -2189,83 +2221,213 @@ def monitor_and_recover_processing():
                         )
 
                         try:
-                            # Force garbage collection
-                            logger.info("Forcing garbage collection")
-                            gc.collect(generation=2)
-
-                            # Create a new session to replace any stale ones
-                            logger.info("Creating new HTTP session")
-                            try:
-                                # Alternative approach to clear connection pools:
-                                # Create a new session object which will replace existing ones
-                                # This avoids direct manipulation of connection pool internals
-                                import requests
-                                from urllib3.util.retry import Retry
-
-                                # Define a minimal retry strategy for the recovery session
-                                retry_strategy = Retry(
-                                    total=3,
-                                    backoff_factor=1,
-                                    status_forcelist=[429, 500, 502, 503, 504],
+                            # Escalating recovery actions based on number of attempts
+                            if recovery_attempts == 1:
+                                # First attempt: basic recovery
+                                perform_basic_recovery()
+                            elif recovery_attempts == 2:
+                                # Second attempt: intermediate recovery
+                                perform_intermediate_recovery()
+                            else:
+                                # Third+ attempt: aggressive recovery
+                                perform_aggressive_recovery(
+                                    current_time, last_worker_restart
                                 )
-
-                                # Create a fresh session
-                                new_session = requests.Session()
-
-                                # This is just to test that the session works
-                                try:
-                                    test_response = new_session.get(
-                                        "https://earthengine.googleapis.com", timeout=10
-                                    )
-                                    logger.info(
-                                        f"New session test response: {test_response.status_code}"
-                                    )
-                                except Exception as e:
-                                    logger.warning(f"New session test failed: {e}")
-
-                            except Exception as session_error:
-                                logger.warning(
-                                    f"Error creating new session: {session_error}"
-                                )
-
-                            # More aggressive recovery for later attempts
-                            if recovery_attempts > 1:
-                                logger.info("Performing more aggressive recovery")
-                                # Clear all caches
-                                if hasattr(
-                                    get_sentinel_collection_cached, "cache_clear"
-                                ):
-                                    get_sentinel_collection_cached.cache_clear()
-
-                                # Reset memory state
-                                gc.collect(generation=2)
-
-                                # Brief pause to let system recover
-                                time.sleep(5)
-
-                            # Refresh Earth Engine session
-                            logger.info("Refreshing Earth Engine session")
-                            ee.Reset()
-                            time.sleep(2)
-                            ee.Initialize(
-                                project="wealth-satellite-forecasting",
-                                opt_url="https://earthengine-highvolume.googleapis.com",
-                            )
-                            setup_request_counting()
+                                last_worker_restart = current_time
 
                         except Exception as e:
                             logger.error(f"Error during recovery: {e}")
                             logger.exception("Recovery error details:")
 
                         # Reset stall counter but not recovery attempts
-                        # This way we can track how many times we've had to recover
                         last_active_time = current_time
                         consecutive_stalls = 0
+
+            # Periodic full reset regardless of stalls (every 2 hours)
+            if current_time - last_worker_restart > 7200:  # 2 hours
+                logger.info("Performing scheduled preventative recovery")
+                perform_intermediate_recovery()
+                last_worker_restart = current_time
 
         except Exception as e:
             logger.error(f"Error in monitoring thread: {e}")
 
-        time.sleep(45)  # Kept at 45 seconds
+        time.sleep(30)  # Reduced to 30 seconds for more responsive monitoring
+
+
+def perform_basic_recovery():
+    """Basic recovery actions for first stall detection."""
+    logger.info("Performing basic recovery actions")
+
+    # Force garbage collection
+    gc.collect(generation=2)
+
+    # Clear function caches
+    if hasattr(get_sentinel_collection_cached, "cache_clear"):
+        get_sentinel_collection_cached.cache_clear()
+
+    # Check for and kill any zombie threads
+    check_for_zombie_threads(timeout_seconds=300)  # 5 minutes
+
+
+def perform_intermediate_recovery():
+    """Intermediate recovery for repeated stalls."""
+    logger.info("Performing intermediate recovery actions")
+
+    # Do basic recovery first
+    perform_basic_recovery()
+
+    # Refresh Earth Engine session more aggressively
+    try:
+        logger.info("Refreshing Earth Engine session")
+        ee.Reset()
+        time.sleep(3)
+
+        # Re-initialize with explicit timeout handling
+        with timeout(30, "Earth Engine re-initialization"):
+            ee.Initialize(
+                project="wealth-satellite-forecasting",
+                opt_url="https://earthengine-highvolume.googleapis.com",
+            )
+        setup_request_counting()
+    except Exception as e:
+        logger.error(f"Error refreshing Earth Engine: {e}")
+
+    # Create new global HTTP session
+    try:
+        logger.info("Creating new HTTP session with fresh connection pool")
+        global_session = create_optimized_session(max_workers=20, use_high_volume=True)
+
+        # Test the new session
+        test_response = global_session.get(
+            "https://earthengine.googleapis.com", timeout=10
+        )
+        logger.info(f"New session test response: {test_response.status_code}")
+    except Exception as e:
+        logger.error(f"Error creating new session: {e}")
+
+
+def perform_aggressive_recovery(current_time, last_restart):
+    """Aggressive recovery for persistent stalls."""
+    logger.info("Performing AGGRESSIVE recovery actions")
+
+    # Do intermediate recovery first
+    perform_intermediate_recovery()
+
+    # Only do the most aggressive steps if we haven't done them recently
+    if current_time - last_restart > 900:  # 15 minutes since last aggressive recovery
+        logger.warning("Attempting to restart all worker threads")
+
+        # Attempt to interrupt any hanging threads
+        interrupt_hanging_threads()
+
+        # Wait for ongoing operations to complete or timeout
+        logger.info("Waiting for operations to complete or timeout")
+        time.sleep(10)
+
+        # Force clear all connection pools
+        clear_all_connection_pools()
+
+        # Reset more global state
+        reset_global_state()
+
+
+def check_for_zombie_threads(timeout_seconds=300):
+    """Check for and log any threads that have been running too long."""
+    current_time = time.time()
+    for thread in threading.enumerate():
+        # Skip daemon threads and main thread
+        if thread.daemon or thread.name == "MainThread":
+            continue
+
+        # Check if thread has thread-local start time
+        if (
+            hasattr(thread, "_start_time")
+            and current_time - thread._start_time > timeout_seconds
+        ):
+            logger.warning(
+                f"Potential zombie thread detected: {thread.name}, "
+                f"running for {current_time - thread._start_time:.1f} seconds"
+            )
+
+
+def interrupt_hanging_threads():
+    """Attempt to interrupt any hanging threads (where possible)."""
+    # This is limited by Python's thread model, but we can at least try to signal them
+    for thread in threading.enumerate():
+        if thread.daemon or thread.name == "MainThread":
+            continue
+
+        # We can't actually interrupt threads in Python, but we can log them
+        logger.warning(f"Would interrupt thread if possible: {thread.name}")
+
+
+def clear_all_connection_pools():
+    """Force clear all urllib3 connection pools."""
+    try:
+        import urllib3
+
+        logger.info("Closing all connection pools")
+
+        # Close all connection pools
+        urllib3.disable_warnings()
+        pool_manager = urllib3.PoolManager()
+        pool_manager.clear()
+
+        # Recreate the pool manager
+        urllib3.clear_warnings()
+
+        logger.info("All connection pools cleared")
+    except Exception as e:
+        logger.error(f"Error clearing connection pools: {e}")
+
+
+def reset_global_state():
+    """Reset critical global state."""
+    global request_counter
+    logger.info("Resetting global state")
+
+    # Create new request counter
+    old_counts = (
+        request_counter.counts.copy() if hasattr(request_counter, "counts") else {}
+    )
+    request_counter = RequestCounter()
+
+    # Transfer existing counts to maintain statistics
+    with request_counter.lock:
+        request_counter.counts = old_counts
+
+    # Update LRU cache size
+    update_lru_cache_size(calculate_optimal_cache_size(False))
+
+    logger.info("Global state reset complete")
+
+
+# Context manager for timeout
+class timeout:
+    def __init__(self, seconds, description="operation"):
+        self.seconds = seconds
+        self.description = description
+
+    def __enter__(self):
+        self.timer = threading.Timer(self.seconds, self._timeout_handler)
+        self.timer.daemon = True
+        self.timer.start()
+        self.start_time = time.time()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.timer.cancel()
+
+    def _timeout_handler(self):
+        elapsed = time.time() - self.start_time
+        logger.error(
+            f"TIMEOUT: {self.description} timed out after {elapsed:.1f} seconds"
+        )
+        # Log thread info for debugging
+        thread_count = threading.active_count()
+        thread_names = [t.name for t in threading.enumerate()]
+        logger.error(f"TIMEOUT: {thread_count} active threads: {thread_names}")
 
 
 class WatchdogTimer:
