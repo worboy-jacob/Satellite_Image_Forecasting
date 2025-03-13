@@ -1550,6 +1550,7 @@ def monitor_and_recover_processing():
     last_request_count = 0
     last_active_time = time.time()
     consecutive_stalls = 0
+    recovery_attempts = 0
 
     while True:
         try:
@@ -1568,16 +1569,20 @@ def monitor_and_recover_processing():
             else:
                 # No new requests detected
                 elapsed = current_time - last_active_time
-                if elapsed > 180:  # 3 minutes with no activity
+                if (
+                    elapsed > 150
+                ):  # Reduced from 180 to 150 seconds for faster detection
                     consecutive_stalls += 1
                     logger.warning(
                         f"Processing appears stalled for {elapsed:.1f} seconds (stall #{consecutive_stalls})"
                     )
 
                     # After multiple consecutive stalls, try recovery actions
-                    if consecutive_stalls >= 2:
+                    if consecutive_stalls >= 2:  # Kept at 2
+                        recovery_attempts += 1
                         logger.error(
-                            f"Processing stalled for {consecutive_stalls} consecutive checks, attempting recovery"
+                            f"Processing stalled for {consecutive_stalls} consecutive checks, "
+                            f"attempting recovery (attempt #{recovery_attempts})"
                         )
 
                         try:
@@ -1585,14 +1590,53 @@ def monitor_and_recover_processing():
                             logger.info("Forcing garbage collection")
                             gc.collect(generation=2)
 
-                            import urllib3
-                            import requests
-                            from requests.adapters import HTTPAdapter
+                            # Create a new session to replace any stale ones
+                            logger.info("Creating new HTTP session")
+                            try:
+                                # Alternative approach to clear connection pools:
+                                # Create a new session object which will replace existing ones
+                                # This avoids direct manipulation of connection pool internals
+                                import requests
+                                from urllib3.util.retry import Retry
 
-                            logger.info("Clearing connection pools")
-                            # Clear connection pools
-                            for pool in list(urllib3.PoolManager.pools.values()):
-                                pool.clear()
+                                # Define a minimal retry strategy for the recovery session
+                                retry_strategy = Retry(
+                                    total=3,
+                                    backoff_factor=1,
+                                    status_forcelist=[429, 500, 502, 503, 504],
+                                )
+
+                                # Create a fresh session
+                                new_session = requests.Session()
+
+                                # This is just to test that the session works
+                                try:
+                                    test_response = new_session.get(
+                                        "https://earthengine.googleapis.com", timeout=10
+                                    )
+                                    logger.info(
+                                        f"New session test response: {test_response.status_code}"
+                                    )
+                                except Exception as e:
+                                    logger.warning(f"New session test failed: {e}")
+
+                            except Exception as session_error:
+                                logger.warning(
+                                    f"Error creating new session: {session_error}"
+                                )
+
+                            # More aggressive recovery for later attempts
+                            if recovery_attempts > 1:
+                                logger.info("Performing more aggressive recovery")
+                                # Clear all caches
+                                if hasattr(get_viirs_collection_cached, "cache_clear"):
+                                    get_viirs_collection_cached.cache_clear()
+
+                                # Reset memory state
+                                gc.collect(generation=2)
+
+                                # Brief pause to let system recover
+                                time.sleep(5)
 
                             # Refresh Earth Engine session
                             logger.info("Refreshing Earth Engine session")
@@ -1608,14 +1652,15 @@ def monitor_and_recover_processing():
                             logger.error(f"Error during recovery: {e}")
                             logger.exception("Recovery error details:")
 
-                        # Reset counters after recovery attempt
+                        # Reset stall counter but not recovery attempts
+                        # This way we can track how many times we've had to recover
                         last_active_time = current_time
                         consecutive_stalls = 0
 
         except Exception as e:
             logger.error(f"Error in monitoring thread: {e}")
 
-        time.sleep(45)
+        time.sleep(45)  # Kept at 45 seconds
 
 
 def cleanup_processing_files(output_dir, country_name, year):

@@ -119,6 +119,21 @@ def main():
                     grid_gdf=grid_gdf,
                     config=config,
                 )
+                # Scan for missing data in Sentinel files
+                logger.info(
+                    f"Scanning for missing data again in Sentinel files for {country_name}, year {year}"
+                )
+                scan_for_missing_data(
+                    data_type="sentinel", country_name=country_name, year=year
+                )
+
+                # Scan for missing data in VIIRS files
+                logger.info(
+                    f"Scanning for missing data again in VIIRS files for {country_name}, year {year}"
+                )
+                scan_for_missing_data(
+                    data_type="viirs", country_name=country_name, year=year
+                )
 
         # Log success
         logger.info("Pipeline execution completed successfully")

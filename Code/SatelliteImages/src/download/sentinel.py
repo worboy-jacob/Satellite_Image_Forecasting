@@ -2193,14 +2193,40 @@ def monitor_and_recover_processing():
                             logger.info("Forcing garbage collection")
                             gc.collect(generation=2)
 
-                            import urllib3
-                            import requests
-                            from requests.adapters import HTTPAdapter
+                            # Create a new session to replace any stale ones
+                            logger.info("Creating new HTTP session")
+                            try:
+                                # Alternative approach to clear connection pools:
+                                # Create a new session object which will replace existing ones
+                                # This avoids direct manipulation of connection pool internals
+                                import requests
+                                from urllib3.util.retry import Retry
 
-                            logger.info("Clearing connection pools")
-                            # Clear connection pools
-                            for pool in list(urllib3.PoolManager.pools.values()):
-                                pool.clear()
+                                # Define a minimal retry strategy for the recovery session
+                                retry_strategy = Retry(
+                                    total=3,
+                                    backoff_factor=1,
+                                    status_forcelist=[429, 500, 502, 503, 504],
+                                )
+
+                                # Create a fresh session
+                                new_session = requests.Session()
+
+                                # This is just to test that the session works
+                                try:
+                                    test_response = new_session.get(
+                                        "https://earthengine.googleapis.com", timeout=10
+                                    )
+                                    logger.info(
+                                        f"New session test response: {test_response.status_code}"
+                                    )
+                                except Exception as e:
+                                    logger.warning(f"New session test failed: {e}")
+
+                            except Exception as session_error:
+                                logger.warning(
+                                    f"Error creating new session: {session_error}"
+                                )
 
                             # More aggressive recovery for later attempts
                             if recovery_attempts > 1:
