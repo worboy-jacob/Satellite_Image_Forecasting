@@ -489,17 +489,6 @@ def download_sentinel_for_country_year(
                             f"Batch processing attempt {batch_attempt+1}/5 failed: {e}"
                         )
                         logger.error(error_msg)
-                        # Log the batch failure
-                        failure_logger.log_failure(
-                            f"batch_{batch_start}_{batch_end}",
-                            "batch_error",
-                            str(e),
-                            {
-                                "batch_attempt": batch_attempt,
-                                "batch_start": batch_start,
-                                "batch_end": batch_end,
-                            },
-                        )
 
                         if batch_attempt < 4:  # Try up to 5 times (0-4)
                             delay = (
@@ -514,6 +503,17 @@ def download_sentinel_for_country_year(
                     pbar.update(len(current_batch))
                     global_progress["completed"] += len(current_batch)
                     global_progress["last_update"] = time.time()
+                    # Log the batch failure
+                    failure_logger.log_failure(
+                        f"batch_{batch_start}_{batch_end}",
+                        "batch_error",
+                        str(e),
+                        {
+                            "batch_attempt": batch_attempt,
+                            "batch_start": batch_start,
+                            "batch_end": batch_end,
+                        },
+                    )
 
                 # Force garbage collection between batches
                 gc.collect()
@@ -754,9 +754,10 @@ def process_sentinel_cell_optimized(
     output_dir,
     session,
     early_year,
+    failure_logger=None,  # Added failure logger parameter
 ):
     """
-    Optimized version of process_sentinel_cell.
+    Optimized version of process_sentinel_cell with failure logging.
 
     Args:
         idx: Index of the cell in the grid
@@ -770,12 +771,15 @@ def process_sentinel_cell_optimized(
         target_crs: Target CRS
         output_dir: Output directory
         session: Shared HTTP session
+        early_year: Whether this is an early year (pre-2017)
+        failure_logger: Logger for recording failures
 
     Returns:
         Tuple of (cell_id, success_flag)
     """
     cell_id = cell["cell_id"]
     cell_gdf = grid_gdf.iloc[[idx]]
+    placeholder_file = None
 
     try:
         measure_memory_usage(before=True, cell_id=cell_id)
@@ -801,45 +805,77 @@ def process_sentinel_cell_optimized(
             session=session,
             early_year=early_year,
             cell_id=cell_id,
+            failure_logger=failure_logger,  # Pass the failure logger
         )
 
         if not band_arrays:
-            logger.warning(
+            error_msg = (
                 f"No data downloaded for {country_name} cell {cell_id} in {year}"
             )
+            logger.warning(error_msg)
+            # Log the failure
+            if failure_logger:
+                failure_logger.log_failure(
+                    cell_id,
+                    "no_data_error",
+                    error_msg,
+                    {"bands": bands, "cloud_threshold": cloud_threshold},
+                )
             # Clean up placeholder
-            if placeholder_file.exists():
+            if placeholder_file and placeholder_file.exists():
                 placeholder_file.unlink()
             return cell_id, False
 
         # Save the data
-        save_band_arrays(
-            band_arrays=band_arrays,
-            output_dir=output_dir,
-            country_name=country_name,
-            cell_id=cell_id,
-            year=year,
-            grid_cell=cell_gdf,
-            target_crs=target_crs,
-            early_year=early_year,
-        )
+        try:
+            save_band_arrays(
+                band_arrays=band_arrays,
+                output_dir=output_dir,
+                country_name=country_name,
+                cell_id=cell_id,
+                year=year,
+                grid_cell=cell_gdf,
+                target_crs=target_crs,
+                early_year=early_year,
+                failure_logger=failure_logger,  # Pass the failure logger
+            )
+        except Exception as e:
+            error_msg = f"Error saving band arrays for cell {cell_id}: {str(e)}"
+            logger.error(error_msg)
+            if failure_logger:
+                failure_logger.log_failure(
+                    cell_id, "save_error", str(e), {"band_count": len(band_arrays)}
+                )
+            if placeholder_file and placeholder_file.exists():
+                placeholder_file.unlink()
+            return cell_id, False
 
         # Save metadata
-        save_cell_metadata(
-            country_name=country_name,
-            cell_id=cell_id,
-            year=year,
-            bands=bands,
-            cell_gdf=cell_gdf,
-            output_dir=output_dir,
-            composite_method=composite_method,
-            cloud_threshold=cloud_threshold,
-            band_arrays=band_arrays,
-            early_year=early_year,
-        )
+        try:
+            save_cell_metadata(
+                country_name=country_name,
+                cell_id=cell_id,
+                year=year,
+                bands=bands,
+                cell_gdf=cell_gdf,
+                output_dir=output_dir,
+                composite_method=composite_method,
+                cloud_threshold=cloud_threshold,
+                band_arrays=band_arrays,
+                early_year=early_year,
+                failure_logger=failure_logger,  # Pass the failure logger
+            )
+        except Exception as e:
+            error_msg = f"Error saving metadata for cell {cell_id}: {str(e)}"
+            logger.error(error_msg)
+            if failure_logger:
+                failure_logger.log_failure(cell_id, "metadata_error", str(e), {})
+            if placeholder_file and placeholder_file.exists():
+                placeholder_file.unlink()
+            return cell_id, False
 
         # Remove placeholder file
-        if placeholder_file.exists():
+        if placeholder_file and placeholder_file.exists():
             placeholder_file.unlink()
 
         logger.info(
@@ -850,8 +886,18 @@ def process_sentinel_cell_optimized(
         return cell_id, True
 
     except Exception as e:
-        logger.error(f"Error processing cell {cell_id}: {str(e)}")
+        error_msg = f"Error processing cell {cell_id}: {str(e)}"
+        logger.error(error_msg)
         logger.exception(f"Detailed error for cell {cell_id}:")
+        # Log the failure
+        if failure_logger:
+            failure_logger.log_failure(cell_id, "processing_error", str(e), {})
+        # Clean up placeholder if it exists
+        try:
+            if placeholder_file and placeholder_file.exists():
+                placeholder_file.unlink()
+        except:
+            pass
         return cell_id, False
 
 
@@ -1052,14 +1098,6 @@ def download_sentinel_data_optimized(
                     error_msg = (
                         f"Error getting additional images for month {month_idx+1}: {e}"
                     )
-                    logger.error(error_msg)
-                    if failure_logger:
-                        failure_logger.log_failure(
-                            cell_id,
-                            "additional_images_error",
-                            str(e),
-                            {"month_idx": month_idx, "extras": extras},
-                        )
                     # Exit early for additional image failures too
                     error_msg = f"Exiting cell {cell_id} processing due to additional image collection failures"
                     logger.warning(error_msg)
@@ -1295,23 +1333,6 @@ def download_single_band(
                 )
                 logger.warning(error_msg)
 
-                if failure_logger and cell_id:
-                    failure_logger.log_failure(
-                        cell_id,
-                        "band_download_http_error",
-                        error_msg,
-                        {
-                            "band": band,
-                            "attempt": attempt + 1,
-                            "status_code": response.status_code,
-                            "response_text": (
-                                response.text[:1000]
-                                if hasattr(response, "text")
-                                else "N/A"
-                            ),
-                        },
-                    )
-
                 if attempt < max_retries - 1:
                     logger.warning(f"Retrying in {actual_delay:.1f}s")
                     time.sleep(actual_delay)
@@ -1319,6 +1340,22 @@ def download_single_band(
                     continue
                 else:
                     logger.error(f"Max retries reached for band {band}")
+                    if failure_logger and cell_id:
+                        failure_logger.log_failure(
+                            cell_id,
+                            "band_download_http_error",
+                            error_msg,
+                            {
+                                "band": band,
+                                "attempt": attempt + 1,
+                                "status_code": response.status_code,
+                                "response_text": (
+                                    response.text[:1000]
+                                    if hasattr(response, "text")
+                                    else "N/A"
+                                ),
+                            },
+                        )
                     return None
 
             # Save to a temporary file
@@ -1357,14 +1394,6 @@ def download_single_band(
             error_msg = f"Error downloading band {band}, attempt {attempt+1}/{max_retries}: {str(e)}"
             logger.warning(error_msg)
 
-            if failure_logger and cell_id:
-                failure_logger.log_failure(
-                    cell_id,
-                    "band_download_error",
-                    str(e),
-                    {"band": band, "attempt": attempt + 1},
-                )
-
             # Clean up temporary file if it exists
             if tmp_path and os.path.exists(tmp_path):
                 try:
@@ -1380,6 +1409,13 @@ def download_single_band(
                 logger.error(
                     f"Failed to download band {band} after {max_retries} attempts"
                 )
+                if failure_logger and cell_id:
+                    failure_logger.log_failure(
+                        cell_id,
+                        "band_download_error",
+                        str(e),
+                        {"band": band, "attempt": attempt + 1},
+                    )
                 return None
 
     return None

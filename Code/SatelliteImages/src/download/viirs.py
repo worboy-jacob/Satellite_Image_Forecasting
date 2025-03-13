@@ -590,17 +590,6 @@ def download_viirs_for_country_year(
                             f"Batch processing attempt {batch_attempt+1}/5 failed: {e}"
                         )
                         logger.error(error_msg)
-                        # Log the batch failure
-                        failure_logger.log_failure(
-                            f"batch_{batch_start}_{batch_end}",
-                            "batch_error",
-                            str(e),
-                            {
-                                "batch_attempt": batch_attempt,
-                                "batch_start": batch_start,
-                                "batch_end": batch_end,
-                            },
-                        )
 
                         if batch_attempt < 4:  # Try up to 5 times (0-4)
                             delay = (
@@ -615,6 +604,17 @@ def download_viirs_for_country_year(
                     pbar.update(len(current_batch))
                     global_progress["completed"] += len(current_batch)
                     global_progress["last_update"] = time.time()
+                    # Log the batch failure
+                    failure_logger.log_failure(
+                        f"batch_{batch_start}_{batch_end}",
+                        "batch_error",
+                        str(e),
+                        {
+                            "batch_attempt": batch_attempt,
+                            "batch_start": batch_start,
+                            "batch_end": batch_end,
+                        },
+                    )
 
                 # Force garbage collection between batches
                 gc.collect()
@@ -908,7 +908,6 @@ def process_viirs_cell_optimized(
                 year=year,
                 grid_cell=cell_gdf,
                 target_crs=target_crs,
-                failure_logger=failure_logger,  # Pass the failure logger
             )
         except Exception as e:
             error_msg = f"Error saving band arrays for cell {cell_id}: {str(e)}"
@@ -1125,23 +1124,6 @@ def download_viirs_data_optimized(
                             error_msg = f"Failed to download band {band}: HTTP {response.status_code}"
                             logger.warning(error_msg)
 
-                            if failure_logger:
-                                failure_logger.log_failure(
-                                    cell_id,
-                                    "band_download_http_error",
-                                    error_msg,
-                                    {
-                                        "band": band,
-                                        "attempt": attempt + 1,
-                                        "status_code": response.status_code,
-                                        "response_text": (
-                                            response.text[:1000]
-                                            if hasattr(response, "text")
-                                            else "N/A"
-                                        ),
-                                    },
-                                )
-
                             if attempt < max_retries - 1:
                                 logger.warning(f"Retrying in {actual_delay:.1f}s")
                                 time.sleep(actual_delay)
@@ -1149,6 +1131,22 @@ def download_viirs_data_optimized(
                                 continue
                             else:
                                 logger.error(f"Max retries reached for band {band}")
+                                if failure_logger:
+                                    failure_logger.log_failure(
+                                        cell_id,
+                                        "band_download_http_error",
+                                        error_msg,
+                                        {
+                                            "band": band,
+                                            "attempt": attempt + 1,
+                                            "status_code": response.status_code,
+                                            "response_text": (
+                                                response.text[:1000]
+                                                if hasattr(response, "text")
+                                                else "N/A"
+                                            ),
+                                        },
+                                    )
                                 break
 
                         # Save to a temporary file
@@ -1194,14 +1192,6 @@ def download_viirs_data_optimized(
                         error_msg = f"Error downloading band {band}, attempt {attempt+1}/{max_retries}: {str(e)}"
                         logger.warning(error_msg)
 
-                        if failure_logger:
-                            failure_logger.log_failure(
-                                cell_id,
-                                "band_download_error",
-                                str(e),
-                                {"band": band, "attempt": attempt + 1},
-                            )
-
                         # Clean up temporary file if it exists
                         if tmp_path and os.path.exists(tmp_path):
                             try:
@@ -1214,6 +1204,13 @@ def download_viirs_data_optimized(
                             time.sleep(actual_delay)
                             retry_delay *= 2  # Exponential backoff
                         else:
+                            if failure_logger:
+                                failure_logger.log_failure(
+                                    cell_id,
+                                    "band_download_error",
+                                    str(e),
+                                    {"band": band, "attempt": attempt + 1},
+                                )
                             logger.error(
                                 f"Failed to download band {band} after {max_retries} attempts"
                             )
