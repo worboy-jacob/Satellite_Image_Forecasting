@@ -274,7 +274,7 @@ def download_sentinel_for_country_year(
 
     if not cells_to_process:
         logger.info(
-            f"All cells for {country_name}, year {year} have already been processed"
+            f"All Sentinel-2 cells for {country_name}, year {year} have already been processed"
         )
         return
 

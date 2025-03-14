@@ -194,7 +194,7 @@ class ValueTracker:
                     f"{data_type.capitalize()}: "
                     f"Min={data_stats['min']:.4f}, "
                     f"Max={data_stats['max']:.4f}, "
-                    f"Avg={data_stats['avg']:.4f if data_stats['avg'] is not None else 'N/A'}"
+                    f"Avg={f'{data_stats['avg']:.4f}' if data_stats['avg'] is not None else 'N/A'}"
                 )
 
                 if data_type == "nightlights":
@@ -378,7 +378,7 @@ def download_viirs_for_country_year(
 
     if not cells_to_process:
         logger.info(
-            f"All cells for {country_name}, year {year} have already been processed"
+            f"All VIIRS cells for {country_name}, year {year} have already been processed"
         )
         return
     # Initialize failure logger
