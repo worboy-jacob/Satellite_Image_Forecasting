@@ -962,7 +962,8 @@ def download_viirs_data_optimized(
     composite_method: str = "median",
     target_crs: str = "EPSG:32628",
     session=None,
-    failure_logger=None,  # Added failure logger parameter
+    failure_logger=None,
+    max_retries=6,  # Add max_retries parameter
 ) -> Dict[str, np.ndarray]:
     """
     Download VIIRS nightlights data for a specific grid cell and year.
@@ -976,6 +977,7 @@ def download_viirs_data_optimized(
         target_crs: Target CRS for the output
         session: HTTP session for downloading
         failure_logger: Logger for recording failures
+        max_retries: Maximum number of retry attempts
 
     Returns:
         Dictionary mapping band names to numpy arrays
@@ -985,33 +987,92 @@ def download_viirs_data_optimized(
         start_date = f"{year}-01-01"
         end_date = f"{year}-12-31"
 
-        # Get VIIRS collection for the entire year
-        try:
-            collection = get_viirs_collection_optimized(
-                grid_cell=grid_cell,
-                start_date=start_date,
-                end_date=end_date,
-                bands=bands,
-            )
-        except Exception as e:
-            error_msg = f"Error getting VIIRS collection for cell {cell_id}: {str(e)}"
-            logger.error(error_msg)
-            if failure_logger:
-                failure_logger.log_failure(
-                    cell_id, "collection_error", str(e), {"year": year, "bands": bands}
+        # Add retry logic for getting VIIRS collection
+        retry_delay = 2
+        collection = None
+
+        for attempt in range(max_retries):
+            try:
+                # Get VIIRS collection for the entire year
+                collection = get_viirs_collection_optimized(
+                    grid_cell=grid_cell,
+                    start_date=start_date,
+                    end_date=end_date,
+                    bands=bands,
                 )
+                # If we get here, collection retrieval was successful
+                break
+
+            except Exception as e:
+                error_msg = f"Error getting VIIRS collection for cell {cell_id}, attempt {attempt+1}/{max_retries}: {str(e)}"
+                logger.warning(error_msg)
+
+                if attempt < max_retries - 1:
+                    # Calculate delay with jitter
+                    jitter = random.uniform(0.8, 1.2)
+                    actual_delay = retry_delay * jitter
+                    logger.info(f"Retrying collection retrieval in {actual_delay:.1f}s")
+                    time.sleep(actual_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    # Final attempt failed
+                    error_msg = f"Failed to get VIIRS collection after {max_retries} attempts for cell {cell_id}"
+                    logger.error(error_msg)
+                    if failure_logger:
+                        failure_logger.log_failure(
+                            cell_id,
+                            "collection_error",
+                            str(e),
+                            {"year": year, "bands": bands, "attempts": max_retries},
+                        )
+                    return {}
+
+        # If collection is still None after all retries, exit
+        if collection is None:
             return {}
 
-        # Get the count of images
-        try:
-            count = collection.size().getInfo()
-        except Exception as e:
-            error_msg = f"Error getting collection size for cell {cell_id}: {str(e)}"
-            logger.error(error_msg)
-            if failure_logger:
-                failure_logger.log_failure(
-                    cell_id, "collection_size_error", str(e), {"year": year}
-                )
+        # Add retry logic for getting collection size
+        retry_delay = 2
+        count = None
+
+        for attempt in range(max_retries):
+            try:
+                # Use timeout protection when getting size
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(collection.size().getInfo)
+                    timeout = min(
+                        30 + attempt * 15, 120
+                    )  # Increase timeout with each retry
+                    count = future.result(timeout=timeout)
+                # If we get here, size retrieval was successful
+                break
+
+            except (Exception, concurrent.futures.TimeoutError) as e:
+                error_msg = f"Error getting collection size for cell {cell_id}, attempt {attempt+1}/{max_retries}: {str(e)}"
+                logger.warning(error_msg)
+
+                if attempt < max_retries - 1:
+                    # Calculate delay with jitter
+                    jitter = random.uniform(0.8, 1.2)
+                    actual_delay = retry_delay * jitter
+                    logger.info(f"Retrying size retrieval in {actual_delay:.1f}s")
+                    time.sleep(actual_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    # Final attempt failed
+                    error_msg = f"Failed to get collection size after {max_retries} attempts for cell {cell_id}"
+                    logger.error(error_msg)
+                    if failure_logger:
+                        failure_logger.log_failure(
+                            cell_id,
+                            "collection_size_error",
+                            str(e),
+                            {"year": year, "attempts": max_retries},
+                        )
+                    return {}
+
+        # If count is still None after all retries, exit
+        if count is None:
             return {}
 
         if count == 0:
@@ -1176,8 +1237,6 @@ def download_single_band(
         try:
             # Only recreate the composite and URL if we don't have it yet
             if url is None:
-                print(band)
-
                 if composite_method == "median":
                     band_composite = merged_collection.select(band).median()
                 elif composite_method == "mean":
