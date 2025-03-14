@@ -34,7 +34,7 @@ def setup_logging(log_level: str = "INFO") -> logging.Logger:
     # 5 MB per file, keep 3 backup files
     file_handler = RotatingFileHandler(
         log_path / "image_processing.log",
-        maxBytes=5 * 1024 * 1024,  # 5 MB
+        maxBytes=100 * 1024 * 1024,  # 100 MB
         backupCount=3,
         encoding="utf-8",
     )
