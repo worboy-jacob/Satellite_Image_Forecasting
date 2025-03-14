@@ -473,10 +473,12 @@ def scan_for_missing_data(
     country_name: str,
     year: int,
     expected_bands: Optional[Dict[str, List[str]]] = None,
+    max_workers: int = 8,  # Number of parallel workers
 ) -> None:
     """
     Scan processed data files to identify missing bands or indices and create failure logs.
     Skip cells that already have failure logs to avoid duplication.
+    Uses parallel processing to speed up scanning.
 
     Args:
         data_type: Either 'sentinel' or 'viirs'
@@ -484,6 +486,7 @@ def scan_for_missing_data(
         year: Year to check
         expected_bands: Dictionary mapping data types to lists of expected bands/indices
                        If None, uses defaults for each data type
+        max_workers: Maximum number of parallel workers
     """
     logger = logging.getLogger("data_scanner")
     logger.info(
@@ -534,36 +537,41 @@ def scan_for_missing_data(
 
     logger.info(f"Found {len(existing_failures)} cells with existing failure logs")
 
-    # Keep track of failures
-    failures_count = 0
-    skipped_count = 0
+    # Get all cell directories
+    cell_dirs = list(base_dir.glob("cell_*"))
+    logger.info(f"Found {len(cell_dirs)} cell directories to scan")
 
-    # Scan all cell directories
-    for cell_dir in base_dir.glob("cell_*"):
+    # Define the worker function for parallel processing
+    def process_cell_dir(cell_dir):
         cell_id = cell_dir.name.replace("cell_", "")
         try:
             cell_id = int(cell_id)
         except ValueError:
-            continue
+            return None
 
         # Skip cells that already have failure logs
         if str(cell_id) in existing_failures:
             logger.debug(f"Skipping cell {cell_id} - already has failure logs")
-            skipped_count += 1
-            continue
+            return {
+                "status": "skipped",
+                "cell_id": cell_id,
+                "reason": "existing_failure",
+            }
 
         # Check if cell-specific failure file exists
         cell_failure_file = failures_dir / f"cell_{cell_id}_failure.json"
         if cell_failure_file.exists():
             logger.debug(f"Skipping cell {cell_id} - has individual failure file")
-            skipped_count += 1
-            continue
+            return {
+                "status": "skipped",
+                "cell_id": cell_id,
+                "reason": "individual_failure_file",
+            }
 
         # Check processed data file
         processed_file = cell_dir / "processed_data.npz"
         if not processed_file.exists():
             # Log complete file missing
-            logger.warning(f"Missing processed data file for {cell_id}")
             failure_record = {
                 "timestamp": datetime.now().isoformat(),
                 "country": country_name,
@@ -574,16 +582,12 @@ def scan_for_missing_data(
                 "details": {"expected_file": str(processed_file)},
             }
 
-            # Write to failure log
-            with open(failure_log_file, "a") as f:
-                f.write(json.dumps(failure_record) + "\n")
-
-            # Create cell-specific failure file
-            with open(cell_failure_file, "w") as f:
-                json.dump(failure_record, f, indent=2)
-
-            failures_count += 1
-            continue
+            return {
+                "status": "failure",
+                "cell_id": cell_id,
+                "failure_record": failure_record,
+                "cell_failure_file": str(cell_failure_file),
+            }
 
         # Load the processed data to check for missing bands
         try:
@@ -604,10 +608,6 @@ def scan_for_missing_data(
                         zero_bands.append(band)
 
                 if missing_bands or zero_bands:
-                    logger.warning(
-                        f"Cell {cell_id}: Missing bands: {missing_bands}, Zero bands: {zero_bands}"
-                    )
-
                     failure_record = {
                         "timestamp": datetime.now().isoformat(),
                         "country": country_name,
@@ -622,19 +622,16 @@ def scan_for_missing_data(
                         },
                     }
 
-                    # Write to failure log
-                    with open(failure_log_file, "a") as f:
-                        f.write(json.dumps(failure_record) + "\n")
+                    return {
+                        "status": "failure",
+                        "cell_id": cell_id,
+                        "failure_record": failure_record,
+                        "cell_failure_file": str(cell_failure_file),
+                    }
 
-                    # Create cell-specific failure file
-                    with open(cell_failure_file, "w") as f:
-                        json.dump(failure_record, f, indent=2)
-
-                    failures_count += 1
+                return {"status": "success", "cell_id": cell_id}
 
         except Exception as e:
-            logger.warning(f"Error checking processed data for cell {cell_id}: {e}")
-
             failure_record = {
                 "timestamp": datetime.now().isoformat(),
                 "country": country_name,
@@ -646,16 +643,53 @@ def scan_for_missing_data(
                 "traceback": traceback.format_exc(),
             }
 
-            # Write to failure log
-            with open(failure_log_file, "a") as f:
-                f.write(json.dumps(failure_record) + "\n")
+            return {
+                "status": "failure",
+                "cell_id": cell_id,
+                "failure_record": failure_record,
+                "cell_failure_file": str(cell_failure_file),
+            }
 
-            # Create cell-specific failure file
-            with open(cell_failure_file, "w") as f:
-                json.dump(failure_record, f, indent=2)
+    # Process cells in parallel
+    failures_count = 0
+    skipped_count = 0
+    success_count = 0
 
-            failures_count += 1
+    # Use ThreadPoolExecutor since this is primarily I/O bound
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(process_cell_dir, cell_dir) for cell_dir in cell_dirs
+        ]
+
+        # Process results as they complete
+        for future in tqdm(
+            concurrent.futures.as_completed(futures),
+            total=len(futures),
+            desc="Scanning cells",
+        ):
+            result = future.result()
+            if result is None:
+                continue
+
+            if result["status"] == "skipped":
+                skipped_count += 1
+            elif result["status"] == "failure":
+                failures_count += 1
+
+                # Write to failure logs (need to handle file locking)
+                with open(failure_log_file, "a") as f:
+                    f.write(json.dumps(result["failure_record"]) + "\n")
+
+                # Create cell-specific failure file
+                with open(result["cell_failure_file"], "w") as f:
+                    json.dump(result["failure_record"], f, indent=2)
+
+                logger.warning(f"Cell {result['cell_id']}: Found data issues")
+            elif result["status"] == "success":
+                success_count += 1
 
     logger.info(
-        f"Scanning complete. Found {failures_count} new cells with missing or invalid data. Skipped {skipped_count} cells with existing failure logs."
+        f"Scanning complete. Found {failures_count} cells with missing or invalid data. "
+        f"Skipped {skipped_count} cells with existing failure logs. "
+        f"Successfully verified {success_count} cells."
     )
