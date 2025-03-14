@@ -278,45 +278,40 @@ def initialize_earth_engine(config):
 
     # Add timeout handling
     try:
-        with timeout(60, "Earth Engine initialization"):
-            if use_high_volume:
-                # Initialize with high-volume endpoint
-                ee.Initialize(
-                    project=project_id,
-                    opt_url="https://earthengine-highvolume.googleapis.com",
-                )
-                logger.info("Initialized Earth Engine with high-volume endpoint")
-            else:
-                # Standard initialization
-                ee.Initialize(project=project_id)
-                logger.info("Initialized Earth Engine with standard endpoint")
-            setup_request_counting()
+        if use_high_volume:
+            # Initialize with high-volume endpoint
+            ee.Initialize(
+                project=project_id,
+                opt_url="https://earthengine-highvolume.googleapis.com",
+            )
+            logger.info("Initialized Earth Engine with high-volume endpoint")
+        else:
+            # Standard initialization
+            ee.Initialize(project=project_id)
+            logger.info("Initialized Earth Engine with standard endpoint")
+        setup_request_counting()
 
     except Exception as e:
         logger.warning(
             f"Earth Engine initialization failed: {e}. Attempting to authenticate..."
         )
         try:
-            # Attempt authentication with timeout
-            with timeout(90, "Earth Engine authentication"):
-                ee.Authenticate()
+            ee.Authenticate()
 
-            # Then attempt initialization again with timeout
-            with timeout(60, "Earth Engine re-initialization"):
-                if use_high_volume:
-                    ee.Initialize(
-                        project=project_id,
-                        opt_url="https://earthengine-highvolume.googleapis.com",
-                    )
-                    logger.info(
-                        "Authenticated and initialized Earth Engine with high-volume endpoint"
-                    )
-                else:
-                    ee.Initialize(project=project_id)
-                    logger.info(
-                        "Authenticated and initialized Earth Engine with standard endpoint"
-                    )
-                setup_request_counting()
+            if use_high_volume:
+                ee.Initialize(
+                    project=project_id,
+                    opt_url="https://earthengine-highvolume.googleapis.com",
+                )
+                logger.info(
+                    "Authenticated and initialized Earth Engine with high-volume endpoint"
+                )
+            else:
+                ee.Initialize(project=project_id)
+                logger.info(
+                    "Authenticated and initialized Earth Engine with standard endpoint"
+                )
+            setup_request_counting()
 
         except Exception as auth_error:
             logger.error(f"Earth Engine authentication failed: {auth_error}")
@@ -372,7 +367,20 @@ def download_viirs_for_country_year(
     """
     # Get the output directory
     output_dir = get_results_dir() / "Images" / "VIIRS"
+    cells_to_process = []
+    for idx, cell in grid_gdf.iterrows():
+        cell_id = cell["cell_id"]
+        cell_dir = output_dir / country_name / str(year) / f"cell_{cell_id}"
+        metadata_file = cell_dir / "metadata.json"
 
+        if not metadata_file.exists():
+            cells_to_process.append((idx, cell))
+
+    if not cells_to_process:
+        logger.info(
+            f"All cells for {country_name}, year {year} have already been processed"
+        )
+        return
     # Initialize failure logger
     failure_logger = FailureLogger(output_dir, country_name, year)
 
@@ -431,22 +439,6 @@ def download_viirs_for_country_year(
             f"using up to {max_workers} workers with "
             f"{'high-volume' if use_high_volume else 'standard'} endpoint"
         )
-
-        # Filter out cells that have already been processed
-        cells_to_process = []
-        for idx, cell in grid_gdf.iterrows():
-            cell_id = cell["cell_id"]
-            cell_dir = output_dir / country_name / str(year) / f"cell_{cell_id}"
-            metadata_file = cell_dir / "metadata.json"
-
-            if not metadata_file.exists():
-                cells_to_process.append((idx, cell))
-
-        if not cells_to_process:
-            logger.info(
-                f"All cells for {country_name}, year {year} have already been processed"
-            )
-            return
 
         logger.info(
             f"Found {len(cells_to_process)} cells to process for {country_name}, year {year}"
@@ -729,7 +721,6 @@ def create_optimized_session(max_workers=None, use_high_volume=True):
     return session
 
 
-# Use LRU cache for image collections
 @dynamic_lru_cache
 def get_viirs_collection_cached(bounds_key, start_date, end_date, bands_key):
     """
@@ -746,7 +737,13 @@ def get_viirs_collection_cached(bounds_key, start_date, end_date, bands_key):
     """
     # Convert string parameters back to original format
     bounds = [float(x) for x in bounds_key.split("_")]
-    bands = bands_key.split("_") if "_" in bands_key else [bands_key]
+
+    # Fix: Ensure bands are properly parsed
+    # Only split on underscores if they're separating different bands, not within a band name
+    if bands_key == "avg_rad":
+        bands = ["avg_rad"]
+    else:
+        bands = bands_key.split("_") if "_" in bands_key else [bands_key]
 
     # Create a rectangle geometry
     ee_geometry = ee.Geometry.Rectangle(bounds)
@@ -760,6 +757,7 @@ def get_viirs_collection_cached(bounds_key, start_date, end_date, bands_key):
 
     # Select bands if specified
     if bands and bands != ["None"]:
+        # Fix: Use array notation for band selection
         collection = collection.select(bands)
 
     def get_collection_size_with_timeout(collection):
@@ -860,22 +858,16 @@ def process_viirs_cell_optimized(
         placeholder_file = cell_dir / ".processing"
         with open(placeholder_file, "w") as f:
             f.write(f"Started: {datetime.now().isoformat()}")
-
-        watchdog = WatchdogTimer(600, f"Processing cell {cell_id}")  # 10 minute timeout
-        watchdog.start()
-        try:
-            band_arrays = download_viirs_data_optimized(
-                grid_cell=cell_gdf,
-                year=year,
-                bands=bands,
-                composite_method=composite_method,
-                target_crs=target_crs,
-                session=session,
-                cell_id=cell_id,
-                failure_logger=failure_logger,  # Pass the failure logger
-            )
-        finally:
-            watchdog.stop()
+        band_arrays = download_viirs_data_optimized(
+            grid_cell=cell_gdf,
+            year=year,
+            bands=bands,
+            composite_method=composite_method,
+            target_crs=target_crs,
+            session=session,
+            cell_id=cell_id,
+            failure_logger=failure_logger,  # Pass the failure logger
+        )
 
         if not band_arrays:
             error_msg = (
@@ -892,10 +884,6 @@ def process_viirs_cell_optimized(
                 placeholder_file.unlink()
             return cell_id, False
 
-        save_watchdog = WatchdogTimer(
-            300, f"Saving data for cell {cell_id}"
-        )  # 5 minute timeout
-        save_watchdog.start()
         try:
             save_viirs_band_arrays(
                 band_arrays=band_arrays,
@@ -916,13 +904,7 @@ def process_viirs_cell_optimized(
             if placeholder_file and placeholder_file.exists():
                 placeholder_file.unlink()
             return cell_id, False
-        finally:
-            save_watchdog.stop()
 
-        metadata_watchdog = WatchdogTimer(
-            120, f"Saving metadata for cell {cell_id}"
-        )  # 2 minute timeout
-        metadata_watchdog.start()
         try:
             save_viirs_cell_metadata(
                 country_name=country_name,
@@ -942,8 +924,6 @@ def process_viirs_cell_optimized(
             if placeholder_file and placeholder_file.exists():
                 placeholder_file.unlink()
             return cell_id, False
-        finally:
-            metadata_watchdog.stop()
 
         # Remove placeholder file
         if placeholder_file and placeholder_file.exists():
@@ -1060,185 +1040,64 @@ def download_viirs_data_optimized(
         width_meters = utm_maxx - utm_minx
         height_meters = utm_maxy - utm_miny
 
-        # Create the composite based on the specified method
-        try:
-            if composite_method == "median":
-                composite = collection.median()
-            elif composite_method == "mean":
-                composite = collection.mean()
-            else:
-                logger.warning(
-                    f"Unknown composite method: {composite_method}, using median"
-                )
-                composite = collection.median()
-        except Exception as e:
-            error_msg = f"Error creating composite for cell {cell_id}: {str(e)}"
-            logger.error(error_msg)
-            if failure_logger:
-                failure_logger.log_failure(
-                    cell_id, "composite_error", str(e), {"method": composite_method}
-                )
-            return {}
-
         # Calculate expected dimensions based on VIIRS resolution (~463m)
-        viirs_resolution = 463.83  # meters per pixel
-        width_pixels = int(width_meters / viirs_resolution)
-        height_pixels = int(height_meters / viirs_resolution)
-
-        logger.info(
-            f"Calculated dimensions for cell {cell_id}: {width_pixels}x{height_pixels} pixels"
-        )
-
-        # Download each band
+        # Create dictionaries to store the band arrays
         band_arrays = {}
 
-        for band in bands:
-            try:
-                # Get download URL with explicit dimensions
-                url = composite.select(band).getDownloadURL(
-                    {
-                        "region": region,
-                        "dimensions": f"{width_pixels}x{height_pixels}",
-                        "format": "GEO_TIFF",
-                        "crs": target_crs,
-                    }
+        # Process bands in parallel using ThreadPoolExecutor
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(len(bands) * 2, 20)
+        ) as executor:
+            # Submit download tasks for each band
+            future_to_band = {}
+
+            for band in bands:
+                future = executor.submit(
+                    download_single_band,
+                    merged_collection=collection,
+                    band=band,
+                    composite_method=composite_method,
+                    region=region,
+                    width_meters=width_meters,
+                    height_meters=height_meters,
+                    target_crs=target_crs,
+                    session=session,
+                    failure_logger=failure_logger,
+                    cell_id=cell_id,
                 )
+                future_to_band[future] = band
 
-                # Download with retries
-                max_retries = 8  # Increased from 5
-                retry_delay = 2
-                tmp_path = None
-
-                for attempt in range(max_retries):
-                    try:
-                        # Add jitter to retry delay to prevent thundering herd
-                        jitter = random.uniform(0.8, 1.2)
-                        actual_delay = retry_delay * jitter
-
-                        # Add timeout with exponential increase for later attempts
-                        timeout = min(
-                            300 + attempt * 60, 600
-                        )  # Start at 5 min, max 10 min
-
-                        logger.debug(
-                            f"Download attempt {attempt+1}/{max_retries} for band {band}, timeout={timeout}s"
-                        )
-                        response = session.get(url, timeout=timeout)
-
-                        if response.status_code != 200:
-                            error_msg = f"Failed to download band {band}: HTTP {response.status_code}"
-                            logger.warning(error_msg)
-
-                            if attempt < max_retries - 1:
-                                logger.warning(f"Retrying in {actual_delay:.1f}s")
-                                time.sleep(actual_delay)
-                                retry_delay *= 2  # Exponential backoff
-                                continue
-                            else:
-                                logger.error(f"Max retries reached for band {band}")
-                                if failure_logger:
-                                    failure_logger.log_failure(
-                                        cell_id,
-                                        "band_download_http_error",
-                                        error_msg,
-                                        {
-                                            "band": band,
-                                            "attempt": attempt + 1,
-                                            "status_code": response.status_code,
-                                            "response_text": (
-                                                response.text[:1000]
-                                                if hasattr(response, "text")
-                                                else "N/A"
-                                            ),
-                                        },
-                                    )
-                                break
-
-                        # Save to a temporary file
-                        with tempfile.NamedTemporaryFile(
-                            suffix=".tif", delete=False
-                        ) as tmp:
-                            tmp.write(response.content)
-                            tmp_path = tmp.name
-
-                        # Read the GeoTIFF with rasterio
-                        with rasterio.open(tmp_path) as src:
-                            band_array = src.read(1)
-                            logger.info(
-                                f"Downloaded band {band} with shape {band_array.shape}"
-                            )
-
-                            # Verify we got reasonable data
-                            if band_array.shape[0] < 5 or band_array.shape[1] < 5:
-                                error_msg = f"Band {band} has unexpectedly low resolution: {band_array.shape}"
-                                logger.error(error_msg)
-
-                                if failure_logger:
-                                    failure_logger.log_failure(
-                                        cell_id,
-                                        "band_resolution_error",
-                                        error_msg,
-                                        {"band": band, "shape": band_array.shape},
-                                    )
-
-                                os.unlink(tmp_path)
-                                tmp_path = None
-                                break
-
-                        # Remove the temporary file
-                        os.unlink(tmp_path)
-                        tmp_path = None
-
-                        # Store the band array
+            # Process results as they complete
+            for future in concurrent.futures.as_completed(future_to_band):
+                band = future_to_band[future]
+                try:
+                    band_array = future.result()
+                    if band_array is not None:
                         band_arrays[band] = band_array
-                        break  # Success, exit retry loop
-
-                    except Exception as e:
-                        error_msg = f"Error downloading band {band}, attempt {attempt+1}/{max_retries}: {str(e)}"
-                        logger.warning(error_msg)
-
-                        # Clean up temporary file if it exists
-                        if tmp_path and os.path.exists(tmp_path):
-                            try:
-                                os.unlink(tmp_path)
-                                tmp_path = None
-                            except:
-                                pass
-
-                        if attempt < max_retries - 1:
-                            time.sleep(actual_delay)
-                            retry_delay *= 2  # Exponential backoff
-                        else:
-                            if failure_logger:
-                                failure_logger.log_failure(
-                                    cell_id,
-                                    "band_download_error",
-                                    str(e),
-                                    {"band": band, "attempt": attempt + 1},
-                                )
-                            logger.error(
-                                f"Failed to download band {band} after {max_retries} attempts"
+                    else:
+                        if failure_logger:
+                            failure_logger.log_failure(
+                                cell_id,
+                                "band_download_failed",
+                                f"Band {band} download returned None",
+                                {"band": band},
                             )
-
-            except Exception as e:
-                error_msg = f"Error processing band {band}: {str(e)}"
-                logger.error(error_msg)
-                if failure_logger:
-                    failure_logger.log_failure(
-                        cell_id, "band_processing_error", str(e), {"band": band}
-                    )
-
-        # If no bands were successfully downloaded, log and return empty
+                except Exception as e:
+                    error_msg = f"Error downloading band {band}: {e}"
+                    logger.error(error_msg)
+                    if failure_logger:
+                        failure_logger.log_failure(
+                            cell_id, "band_future_error", str(e), {"band": band}
+                        )
         if not band_arrays:
-            error_msg = f"No bands were successfully downloaded for cell {cell_id}"
+            error_msg = f"All bands failed to download for cell {cell_id}"
             logger.error(error_msg)
             if failure_logger:
                 failure_logger.log_failure(
                     cell_id, "all_bands_failed", error_msg, {"bands": bands}
                 )
             return {}
-
-        # Calculate gradient if we have the avg_rad band
+            # Calculate gradient if we have the avg_rad band
         if "avg_rad" in band_arrays:
             try:
                 # Calculate the nightlight gradient
@@ -1274,6 +1133,191 @@ def download_viirs_data_optimized(
                 cell_id, "download_data_error", str(e), {"year": year, "bands": bands}
             )
         return {}
+
+
+def download_single_band(
+    merged_collection,
+    band,
+    composite_method,
+    region,
+    width_meters,
+    height_meters,
+    target_crs,
+    session=None,
+    failure_logger=None,
+    cell_id=None,
+    max_retries=8,
+):
+    """Download a single band with comprehensive retry logic including preparation phase."""
+    import tempfile
+
+    viirs_resolution = 463.83  # meters per pixel
+    width_pixels = int(width_meters / viirs_resolution)
+    height_pixels = int(height_meters / viirs_resolution)
+
+    logger.info(
+        f"Calculated dimensions for cell {cell_id}: {width_pixels}x{height_pixels} pixels"
+    )
+
+    # Use the provided session or create a new one
+    if session is None:
+        session = requests
+
+    # Main retry loop for the entire download process including preparation
+    retry_delay = 2
+    tmp_path = None
+    url = None
+
+    for attempt in range(max_retries):
+        # Initialize actual_delay here so it's always defined
+        jitter = random.uniform(0.8, 1.2)
+        actual_delay = retry_delay * jitter
+
+        try:
+            # Only recreate the composite and URL if we don't have it yet
+            if url is None:
+                print(band)
+
+                if composite_method == "median":
+                    band_composite = merged_collection.select(band).median()
+                elif composite_method == "mean":
+                    band_composite = merged_collection.select(band).mean()
+                else:
+                    # Default to median
+                    band_composite = merged_collection.select(band).median()
+
+                # Get download URL with explicit dimensions
+                url = band_composite.getDownloadURL(
+                    {
+                        "region": region,
+                        "dimensions": f"{width_pixels}x{height_pixels}",
+                        "format": "GEO_TIFF",
+                        "crs": target_crs,
+                    }
+                )
+                logger.debug(
+                    f"Created download URL for band {band}, attempt {attempt+1}"
+                )
+
+            # Add timeout with exponential increase for later attempts
+            timeout = min(300 + attempt * 60, 600)  # Start at 5 min, max 10 min
+
+            logger.debug(
+                f"Download attempt {attempt+1}/{max_retries} for band {band}, timeout={timeout}s"
+            )
+
+            # Download the data
+            response = session.get(url, timeout=timeout)
+
+            if response.status_code != 200:
+                error_msg = (
+                    f"Failed to download band {band}: HTTP {response.status_code}"
+                )
+                logger.warning(error_msg)
+
+                if attempt < max_retries - 1:
+                    # If we got a 403 or 401, the URL might be expired - force regeneration
+                    if response.status_code in (401, 403, 404):
+                        url = None  # Force URL regeneration on next attempt
+
+                    logger.warning(f"Retrying in {actual_delay:.1f}s")
+                    time.sleep(actual_delay)
+                    retry_delay *= 2  # Exponential backoff
+                    continue
+                else:
+                    logger.error(f"Max retries reached for band {band}")
+                    if failure_logger and cell_id:
+                        failure_logger.log_failure(
+                            cell_id,
+                            "band_download_http_error",
+                            error_msg,
+                            {
+                                "band": band,
+                                "attempt": attempt + 1,
+                                "status_code": response.status_code,
+                            },
+                        )
+                    return None
+
+            # Save to a temporary file
+            with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as tmp:
+                tmp.write(response.content)
+                tmp_path = tmp.name
+
+            # Read the GeoTIFF with rasterio
+            with rasterio.open(tmp_path) as src:
+                band_array = src.read(1)
+                logger.info(f"Downloaded band {band} with shape {band_array.shape}")
+
+                # Verify we got reasonable data
+                if band_array.shape[0] < 5 or band_array.shape[1] < 5:
+                    error_msg = f"Band {band} has unexpectedly low resolution: {band_array.shape}"
+                    logger.error(error_msg)
+
+                    if failure_logger and cell_id:
+                        failure_logger.log_failure(
+                            cell_id,
+                            "band_resolution_error",
+                            error_msg,
+                            {"band": band, "shape": band_array.shape},
+                        )
+
+                    os.unlink(tmp_path)
+                    tmp_path = None
+
+                    # Force URL regeneration and retry if not the last attempt
+                    if attempt < max_retries - 1:
+                        url = None
+                        logger.warning(f"Retrying with new URL in {actual_delay:.1f}s")
+                        time.sleep(actual_delay)
+                        retry_delay *= 2
+                        continue
+                    return None
+
+            # Remove the temporary file
+            if tmp_path:
+                os.unlink(tmp_path)
+                tmp_path = None
+
+            # Success! Return the band array
+            return band_array
+
+        except Exception as e:
+            error_msg = (
+                f"Error with band {band}, attempt {attempt+1}/{max_retries}: {str(e)}"
+            )
+            logger.warning(error_msg)
+
+            # Clean up temporary file if it exists
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                    tmp_path = None
+                except:
+                    pass
+
+            # For most errors, we should try regenerating the URL
+            url = None
+
+            if attempt < max_retries - 1:
+                logger.info(f"Will retry in {actual_delay:.1f}s")
+                time.sleep(actual_delay)
+                retry_delay *= 2  # Exponential backoff
+            else:
+                logger.error(
+                    f"Failed to process band {band} after {max_retries} attempts"
+                )
+                if failure_logger and cell_id:
+                    failure_logger.log_failure(
+                        cell_id,
+                        "band_processing_error",
+                        str(e),
+                        {"band": band, "attempt": attempt + 1},
+                    )
+                return None
+
+    # We should never reach here, but just in case
+    return None
 
 
 def save_viirs_band_arrays(
@@ -1568,10 +1612,9 @@ def monitor_request_rate():
         time.sleep(15)
 
 
-# 1. Improved monitoring and recovery mechanism
 def monitor_and_recover_processing():
     """
-    Enhanced monitoring function with more aggressive recovery capabilities.
+    Enhanced monitoring function with complete restart capability when stalled.
     """
     last_request_count = 0
     last_active_time = time.time()
@@ -1594,6 +1637,7 @@ def monitor_and_recover_processing():
             if current_count > last_request_count:
                 # Activity detected, reset stall counter
                 consecutive_stalls = 0
+                recovery_attempts = 0  # Reset recovery attempts on successful activity
                 last_active_time = current_time
                 last_request_count = current_count
                 logger.debug(
@@ -1603,7 +1647,7 @@ def monitor_and_recover_processing():
             else:
                 # No new requests detected
                 elapsed = current_time - last_active_time
-                if elapsed > 120:  # Reduced to 2 minutes for faster detection
+                if elapsed > 120:  # 2 minutes of inactivity
                     consecutive_stalls += 1
                     logger.warning(
                         f"Processing appears stalled for {elapsed:.1f} seconds (stall #{consecutive_stalls}), "
@@ -1627,11 +1671,16 @@ def monitor_and_recover_processing():
                                 # Second attempt: intermediate recovery
                                 perform_intermediate_recovery()
                             else:
-                                # Third+ attempt: aggressive recovery
-                                perform_aggressive_recovery(
-                                    current_time, last_worker_restart
+                                # Third+ attempt: COMPLETE RESTART
+                                logger.critical(
+                                    "CRITICAL STALL DETECTED. Initiating full process restart!"
                                 )
-                                last_worker_restart = current_time
+
+                                # Save command line arguments and restart the process
+                                python = sys.executable
+                                os.execl(python, python, *sys.argv)
+                                # This will completely restart the current Python process
+                                # No code after this point will execute in the current process
 
                         except Exception as e:
                             logger.error(f"Error during recovery: {e}")
@@ -1650,7 +1699,7 @@ def monitor_and_recover_processing():
         except Exception as e:
             logger.error(f"Error in monitoring thread: {e}")
 
-        time.sleep(30)  # Reduced to 30 seconds for more responsive monitoring
+        time.sleep(30)  # Check every 30 seconds
 
 
 def perform_basic_recovery():
@@ -1681,12 +1730,10 @@ def perform_intermediate_recovery():
         ee.Reset()
         time.sleep(3)
 
-        # Re-initialize with explicit timeout handling
-        with timeout(30, "Earth Engine re-initialization"):
-            ee.Initialize(
-                project="wealth-satellite-forecasting",
-                opt_url="https://earthengine-highvolume.googleapis.com",
-            )
+        ee.Initialize(
+            project="wealth-satellite-forecasting",
+            opt_url="https://earthengine-highvolume.googleapis.com",
+        )
         setup_request_counting()
     except Exception as e:
         logger.error(f"Error refreshing Earth Engine: {e}")
@@ -1703,31 +1750,6 @@ def perform_intermediate_recovery():
         logger.info(f"New session test response: {test_response.status_code}")
     except Exception as e:
         logger.error(f"Error creating new session: {e}")
-
-
-def perform_aggressive_recovery(current_time, last_restart):
-    """Aggressive recovery for persistent stalls."""
-    logger.info("Performing AGGRESSIVE recovery actions")
-
-    # Do intermediate recovery first
-    perform_intermediate_recovery()
-
-    # Only do the most aggressive steps if we haven't done them recently
-    if current_time - last_restart > 900:  # 15 minutes since last aggressive recovery
-        logger.warning("Attempting to restart all worker threads")
-
-        # Attempt to interrupt any hanging threads
-        interrupt_hanging_threads()
-
-        # Wait for ongoing operations to complete or timeout
-        logger.info("Waiting for operations to complete or timeout")
-        time.sleep(10)
-
-        # Force clear all connection pools
-        clear_all_connection_pools()
-
-        # Reset more global state
-        reset_global_state()
 
 
 def check_for_zombie_threads(timeout_seconds=300):
@@ -1796,36 +1818,9 @@ def reset_global_state():
         request_counter.counts = old_counts
 
     # Update LRU cache size
-    update_lru_cache_size(calculate_optimal_cache_size(False))
+    update_lru_cache_size(calculate_optimal_cache_size())
 
     logger.info("Global state reset complete")
-
-
-# Context manager for timeout
-class timeout:
-    def __init__(self, seconds, description="operation"):
-        self.seconds = seconds
-        self.description = description
-
-    def __enter__(self):
-        self.timer = threading.Timer(self.seconds, self._timeout_handler)
-        self.timer.daemon = True
-        self.timer.start()
-        self.start_time = time.time()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.timer.cancel()
-
-    def _timeout_handler(self):
-        elapsed = time.time() - self.start_time
-        logger.error(
-            f"TIMEOUT: {self.description} timed out after {elapsed:.1f} seconds"
-        )
-        # Log thread info for debugging
-        thread_count = threading.active_count()
-        thread_names = [t.name for t in threading.enumerate()]
-        logger.error(f"TIMEOUT: {thread_count} active threads: {thread_names}")
 
 
 def cleanup_processing_files(output_dir, country_name, year):
@@ -2256,38 +2251,3 @@ def save_value_statistics(output_dir: Path, country_name: str, year: int):
         json.dump(stats, f, indent=2)
 
     logger.info(f"Saved value statistics to {stats_file}")
-
-
-class WatchdogTimer:
-    """Watchdog timer to detect and handle hanging operations."""
-
-    def __init__(self, timeout_seconds, description):
-        self.timeout = timeout_seconds
-        self.description = description
-        self.start_time = None
-        self.timer = None
-
-    def start(self):
-        """Start the watchdog timer."""
-        self.start_time = time.time()
-        self.timer = threading.Timer(self.timeout, self._timeout_handler)
-        self.timer.daemon = True
-        self.timer.start()
-
-    def stop(self):
-        """Stop the watchdog timer."""
-        if self.timer:
-            self.timer.cancel()
-            self.timer = None
-
-    def _timeout_handler(self):
-        """Handle a timeout event."""
-        elapsed = time.time() - self.start_time
-        logger.error(
-            f"WATCHDOG: Operation '{self.description}' timed out after {elapsed:.1f} seconds"
-        )
-
-        # Log diagnostic information
-        thread_count = threading.active_count()
-        thread_names = [t.name for t in threading.enumerate()]
-        logger.error(f"WATCHDOG: {thread_count} active threads: {thread_names}")

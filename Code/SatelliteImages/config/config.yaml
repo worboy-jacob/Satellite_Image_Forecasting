@@ -1,15 +1,15 @@
 countries:
   - name: "Senegal"
     iso: "SEN"
-    years: [2023, 2019, 2018, 2017, 2016, 2015,2024]
+    years: [2019, 2023, 2018, 2024] #2017,2016,2015
     crs: "EPSG:32628"
     validate_files: True
     validation_sample_ratio: 0.2
 
-  - name: "Ghana"
-    iso: "GHA"
-    years: [2022]
-    crs: "EPSG:32630" 
+  #- name: "Ghana"
+    #iso: "GHA"
+    #years: [2022]
+    #crs: "EPSG:32630" 
 
 log_level: "INFO"
 
@@ -25,17 +25,11 @@ sentinel:
   cloud_threshold: 20
   composite_method: "median"
 
+
+# Add this section to your existing config.yaml
 viirs:
-  product: "NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG"
-  band: "avg_rad"
-
-features:
-  extract:
-    - "ndvi"
-    - "built_up_index"
-    - "nightlight_intensity"
-    - "nightlight_gradient"
-
-output:
-  format: "numpy"
-  directory: "SatelliteImageData"
+  collection: "NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG"
+  bands: ["avg_rad"]
+  temporal_aggregation: "annual"  # Options: "annual", "monthly"
+  composite_method: "median"  # Options: "median", "mean"
+  sample_points_per_country: 5000  # For normalization statistics
