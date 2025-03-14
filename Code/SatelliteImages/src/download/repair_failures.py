@@ -27,7 +27,7 @@ import rasterio
 from rasterio.transform import from_origin
 import requests
 from tqdm import tqdm
-
+import sys
 import traceback
 
 # Import necessary modules from sentinel and viirs
@@ -58,7 +58,8 @@ if not logger.handlers:
     # Don't add a StreamHandler here since the root logger will handle console output
     logger.setLevel(logging.INFO)
     logger.propagate = True  # Allow messages to propagate to the root logger
-
+for handler in logger.handlers:
+    handler.flush = sys.stdout.flush
 # Constants
 BAND_RESOLUTION = {
     # 10m bands
