@@ -41,6 +41,8 @@ from src.processing.resampling import (
 import json
 import traceback
 import random
+import queue
+from queue import Queue, Empty
 
 logger = logging.getLogger("image_processing")
 for handler in logger.handlers:
@@ -283,6 +285,20 @@ def download_sentinel_for_country_year(
 
     try:
         # Start the monitoring threads
+
+        progress_queue = Queue()
+        progress_thread_stop = threading.Event()
+        progress_thread = threading.Thread(
+            target=progress_updater_thread,
+            args=(
+                progress_queue,
+                len(cells_to_process),
+                f"Processing {country_name} {year}",
+                progress_thread_stop,
+            ),
+            daemon=True,
+        )
+        progress_thread.start()
         monitor_thread = threading.Thread(target=monitor_request_rate, daemon=True)
         monitor_thread.start()
 
@@ -366,185 +382,162 @@ def download_sentinel_for_country_year(
             f"Processing cells in batches of {batch_size} (memory-based calculation)"
         )
 
-        # Track global progress
-        global_progress = {
-            "completed": 0,
-            "total": len(cells_to_process),
-            "last_update": time.time(),
-            "stalled_since": None,
-        }
-
         # Variables to track request count for session refresh
         last_request_count = sum(request_counter.counts.values())
         last_active_time = time.time()
 
-        with tqdm(
-            total=len(cells_to_process), desc=f"Processing {country_name} {year}"
-        ) as pbar:
-            # Process in batches to avoid overwhelming memory
-            for batch_start in range(0, len(cells_to_process), batch_size):
-                batch_end = min(batch_start + batch_size, len(cells_to_process))
-                current_batch = cells_to_process[batch_start:batch_end]
+        # Process in batches to avoid overwhelming memory
+        for batch_start in range(0, len(cells_to_process), batch_size):
+            batch_end = min(batch_start + batch_size, len(cells_to_process))
+            current_batch = cells_to_process[batch_start:batch_end]
 
-                logger.info(
-                    f"Processing batch {batch_start//batch_size + 1}/{(len(cells_to_process)-1)//batch_size + 1} "
-                    f"({len(current_batch)} cells)"
-                )
+            logger.info(
+                f"Processing batch {batch_start//batch_size + 1}/{(len(cells_to_process)-1)//batch_size + 1} "
+                f"({len(current_batch)} cells)"
+            )
 
-                # Process batch with retry mechanism (simplified)
-                batch_success = False
-                for batch_attempt in range(
-                    5
-                ):  # Increased from 3 to 5 attempts per batch
-                    if batch_attempt > 0:
-                        logger.info(f"Retry attempt {batch_attempt} for batch")
-                        # For retries, refresh the session and clear caches
-                        session = create_optimized_session(
-                            max_workers=max_workers, use_high_volume=use_high_volume
-                        )
-                        gc.collect()
-
-                    try:
-                        # Use a ThreadPoolExecutor for better control over concurrency
-                        with concurrent.futures.ThreadPoolExecutor(
-                            max_workers=max_workers
-                        ) as executor:
-                            batch_timeout = time.time() + (
-                                360 * len(current_batch) / max_workers
-                            )
-                            # Submit all tasks
-                            future_to_cell = {
-                                executor.submit(
-                                    process_sentinel_cell_optimized,
-                                    idx,
-                                    cell,
-                                    grid_gdf,
-                                    country_name,
-                                    year,
-                                    bands,
-                                    cloud_threshold,
-                                    composite_method,
-                                    country_crs,
-                                    output_dir,
-                                    session,
-                                    early_year,
-                                    failure_logger,  # Pass the failure logger
-                                ): (idx, cell)
-                                for idx, cell in current_batch
-                            }
-
-                            # Process completed tasks as they finish
-                            for future in concurrent.futures.as_completed(
-                                future_to_cell
-                            ):
-                                if time.time() > batch_timeout:
-                                    logger.warning(
-                                        "Batch timeout reached, cancelling remaining tasks"
-                                    )
-                                    for f in future_to_cell:
-                                        if not f.done():
-                                            f.cancel()
-                                    break
-                                try:
-                                    cell_id, success = future.result(
-                                        timeout=360  # Increased from 300 to 360 seconds
-                                    )
-                                    pbar.update(1)
-                                    global_progress["completed"] += 1
-                                    global_progress["last_update"] = time.time()
-                                    global_progress["stalled_since"] = None
-
-                                    if not success:
-                                        logger.warning(
-                                            f"Failed to process cell {cell_id}"
-                                        )
-                                except concurrent.futures.TimeoutError:
-                                    idx, cell = future_to_cell[future]
-                                    cell_id = cell["cell_id"]
-                                    error_msg = (
-                                        f"Timeout while processing cell {cell_id}"
-                                    )
-                                    logger.error(error_msg)
-                                    # Log the timeout failure
-                                    failure_logger.log_failure(
-                                        cell_id,
-                                        "timeout_error",
-                                        error_msg,
-                                        {"batch_attempt": batch_attempt},
-                                    )
-                                    pbar.update(1)
-                                    global_progress["completed"] += 1
-                                    global_progress["last_update"] = time.time()
-                                except Exception as e:
-                                    idx, cell = future_to_cell[future]
-                                    cell_id = cell["cell_id"]
-                                    error_msg = f"Unexpected error processing cell {cell_id}: {str(e)}"
-                                    logger.error(error_msg)
-                                    # Log the unexpected failure
-                                    failure_logger.log_failure(
-                                        cell_id,
-                                        "unexpected_error",
-                                        str(e),
-                                        {"batch_attempt": batch_attempt},
-                                    )
-                                    pbar.update(1)
-                                    global_progress["completed"] += 1
-                                    global_progress["last_update"] = time.time()
-
-                        # If we get here, batch completed successfully
-                        batch_success = True
-                        break
-
-                    except Exception as e:
-                        error_msg = (
-                            f"Batch processing attempt {batch_attempt+1}/5 failed: {e}"
-                        )
-                        logger.error(error_msg)
-
-                        if batch_attempt < 4:  # Try up to 5 times (0-4)
-                            delay = (
-                                batch_attempt + 1
-                            ) * 45  # Increased from 30 to 45 seconds
-                            logger.info(f"Retrying batch in {delay} seconds...")
-                            time.sleep(delay)
-
-                if not batch_success:
-                    logger.error(f"Failed to process batch after 5 attempts")
-                    # Update progress bar for skipped cells
-                    pbar.update(len(current_batch))
-                    global_progress["completed"] += len(current_batch)
-                    global_progress["last_update"] = time.time()
-                    # Log the batch failure
-                    failure_logger.log_failure(
-                        f"batch_{batch_start}_{batch_end}",
-                        "batch_error",
-                        str(e),
-                        {
-                            "batch_attempt": batch_attempt,
-                            "batch_start": batch_start,
-                            "batch_end": batch_end,
-                        },
-                    )
-
-                # Force garbage collection between batches
-                gc.collect()
-
-                # Only refresh session if we've seen signs of problems
-                current_request_count = sum(request_counter.counts.values())
-                if (
-                    current_request_count == last_request_count
-                    and time.time() - last_active_time > 60
-                ):
-                    logger.info("No activity detected, refreshing HTTP session")
+            # Process batch with retry mechanism (simplified)
+            batch_success = False
+            for batch_attempt in range(5):
+                if batch_attempt > 0:
+                    logger.info(f"Retry attempt {batch_attempt} for batch")
+                    # For retries, refresh the session and clear caches
                     session = create_optimized_session(
                         max_workers=max_workers, use_high_volume=use_high_volume
                     )
+                    gc.collect()
 
-                # Update tracking variables
-                last_request_count = current_request_count
-                if current_request_count > last_request_count:
-                    last_active_time = time.time()
+                try:
+                    # Use a ThreadPoolExecutor for better control over concurrency
+                    with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=max_workers
+                    ) as executor:
+                        batch_timeout = time.time() + (
+                            360 * len(current_batch) / max_workers
+                        )
+                        # Submit all tasks
+                        future_to_cell = {
+                            executor.submit(
+                                process_sentinel_cell_optimized,
+                                idx,
+                                cell,
+                                grid_gdf,
+                                country_name,
+                                year,
+                                bands,
+                                cloud_threshold,
+                                composite_method,
+                                country_crs,
+                                output_dir,
+                                session,
+                                early_year,
+                                failure_logger,
+                                progress_queue,
+                            ): (idx, cell)
+                            for idx, cell in current_batch
+                        }
 
+                        # Process completed tasks as they finish
+                        for future in concurrent.futures.as_completed(future_to_cell):
+                            if time.time() > batch_timeout:
+                                logger.warning(
+                                    "Batch timeout reached, cancelling remaining tasks"
+                                )
+                                for f in future_to_cell:
+                                    if not f.done():
+                                        f.cancel()
+                                break
+                            try:
+                                cell_id, success = future.result(
+                                    timeout=360  # Increased from 300 to 360 seconds
+                                )
+                                progress_queue.put(1)
+
+                                if not success:
+                                    logger.warning(f"Failed to process cell {cell_id}")
+                            except concurrent.futures.TimeoutError:
+                                idx, cell = future_to_cell[future]
+                                cell_id = cell["cell_id"]
+                                error_msg = f"Timeout while processing cell {cell_id}"
+                                logger.error(error_msg)
+                                # Log the timeout failure
+                                failure_logger.log_failure(
+                                    cell_id,
+                                    "timeout_error",
+                                    error_msg,
+                                    {"batch_attempt": batch_attempt},
+                                )
+                                progress_queue.put(1)
+
+                            except Exception as e:
+                                idx, cell = future_to_cell[future]
+                                cell_id = cell["cell_id"]
+                                error_msg = f"Unexpected error processing cell {cell_id}: {str(e)}"
+                                logger.error(error_msg)
+                                # Log the unexpected failure
+                                failure_logger.log_failure(
+                                    cell_id,
+                                    "unexpected_error",
+                                    str(e),
+                                    {"batch_attempt": batch_attempt},
+                                )
+                                progress_queue.put(1)
+
+                    # If we get here, batch completed successfully
+                    batch_success = True
+                    break
+
+                except Exception as e:
+                    error_msg = (
+                        f"Batch processing attempt {batch_attempt+1}/5 failed: {e}"
+                    )
+                    logger.error(error_msg)
+
+                    if batch_attempt < 4:  # Try up to 5 times (0-4)
+                        delay = (
+                            batch_attempt + 1
+                        ) * 45  # Increased from 30 to 45 seconds
+                        logger.info(f"Retrying batch in {delay} seconds...")
+                        time.sleep(delay)
+
+            if not batch_success:
+                logger.error(f"Failed to process batch after 5 attempts")
+                # Update progress bar for skipped cells
+                for _ in range(len(current_batch)):
+                    progress_queue.put(1)
+
+                # Log the batch failure
+                failure_logger.log_failure(
+                    f"batch_{batch_start}_{batch_end}",
+                    "batch_error",
+                    str(e),
+                    {
+                        "batch_attempt": batch_attempt,
+                        "batch_start": batch_start,
+                        "batch_end": batch_end,
+                    },
+                )
+
+            # Force garbage collection between batches
+            gc.collect()
+
+            # Only refresh session if we've seen signs of problems
+            current_request_count = sum(request_counter.counts.values())
+            if (
+                current_request_count == last_request_count
+                and time.time() - last_active_time > 60
+            ):
+                logger.info("No activity detected, refreshing HTTP session")
+                session = create_optimized_session(
+                    max_workers=max_workers, use_high_volume=use_high_volume
+                )
+
+            # Update tracking variables
+            last_request_count = current_request_count
+            if current_request_count > last_request_count:
+                last_active_time = time.time()
+        progress_thread_stop.set()
+        progress_thread.join(timeout=5)
         # Log failure summary at the end
         failure_summary = failure_logger.get_failure_summary()
         logger.info(f"Failure summary: {failure_summary}")
@@ -558,6 +551,10 @@ def download_sentinel_for_country_year(
         failure_logger.log_failure(
             "global", "critical_error", str(e), {"country": country_name, "year": year}
         )
+        if "progress_thread_stop" in locals():
+            progress_thread_stop.set()
+            if "progress_thread" in locals():
+                progress_thread.join(timeout=1)
         # Re-raise to allow higher-level handling
         raise
 
@@ -751,7 +748,8 @@ def process_sentinel_cell_optimized(
     output_dir,
     session,
     early_year,
-    failure_logger=None,  # Added failure logger parameter
+    failure_logger=None,
+    progress_queue=None,
 ):
     """
     Optimized version of process_sentinel_cell with failure logging.
@@ -770,6 +768,7 @@ def process_sentinel_cell_optimized(
         session: Shared HTTP session
         early_year: Whether this is an early year (pre-2017)
         failure_logger: Logger for recording failures
+        progress_queue: Queue for progress updates
 
     Returns:
         Tuple of (cell_id, success_flag)
@@ -2388,3 +2387,57 @@ def check_for_zombie_threads(timeout_seconds=300):
                 f"Potential zombie thread detected: {thread.name}, "
                 f"running for {current_time - thread._start_time:.1f} seconds"
             )
+
+
+def progress_updater_thread(queue, total, desc, stop_event):
+    """
+    Thread function to handle progress bar updates from a queue at a consistent rate.
+
+    Args:
+        queue: Queue containing progress update increments
+        total: Total number of items to process
+        desc: Description for the progress bar
+        stop_event: Event to signal when the thread should stop
+    """
+    # Update frequency in seconds
+    update_interval = 45
+
+    with tqdm(total=total, desc=desc) as pbar:
+        accumulated_progress = 0
+        last_update_time = time.time()
+
+        while not stop_event.is_set() or not queue.empty():
+            # Process all available items in the queue without blocking
+            items_processed = 0
+
+            # Process queue items without blocking
+            while True:
+                try:
+                    # Non-blocking queue get
+                    increment = queue.get_nowait()
+                    accumulated_progress += increment
+                    items_processed += 1
+                    queue.task_done()
+                except Empty:
+                    # No more items in queue
+                    break
+                except Exception as e:
+                    logger.error(f"Error processing queue item: {e}")
+                    break
+
+            current_time = time.time()
+            time_since_update = current_time - last_update_time
+
+            # Update the progress bar at fixed intervals
+            if time_since_update >= update_interval and accumulated_progress > 0:
+                pbar.update(accumulated_progress)
+                accumulated_progress = 0
+                last_update_time = current_time
+
+            # If no items were processed, sleep a bit to avoid CPU spinning
+            if items_processed == 0:
+                time.sleep(min(0.1, update_interval / 5))
+
+        # Final update to ensure we don't miss any progress
+        if accumulated_progress > 0:
+            pbar.update(accumulated_progress)
