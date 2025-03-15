@@ -112,11 +112,38 @@ class ValueTracker:
 
     def __init__(self):
         self.lock = threading.Lock()
+        self.stats_dir = get_results_dir() / "Images" / "VIIRS"
+        self.stats_dir.mkdir(parents=True, exist_ok=True)
+        self.stats_file = self.stats_dir / "min_max.json"
+
+        # Default values
         self.max_values = {"nightlights": float("-inf"), "gradients": float("-inf")}
         self.min_values = {"nightlights": float("inf"), "gradients": float("inf")}
         self.sum_values = {"nightlights": 0.0, "gradients": 0.0}
         self.count_values = {"nightlights": 0, "gradients": 0}
+        self.avg_values = {"nightlights": 0, "gradients": 0}
         self.cell_count = 0
+
+        # Load existing stats if available
+        if self.stats_file.exists():
+            with open(self.stats_file, "r") as f:
+                try:
+                    stats = json.load(f)
+                    self.max_values.update(stats.get("max", {}))
+                    self.min_values.update(stats.get("min", {}))
+                    self.avg_values.update(stats.get("avg", {}))
+                except json.JSONDecodeError:
+                    pass  # Keep default values if file is corrupted
+
+    def _save_stats(self):
+        """Save the current min/max values to the stats file."""
+        stats = {
+            "max": self.max_values,
+            "min": self.min_values,
+            "avg of most recent processed batch": self.avg_values,
+        }
+        with open(self.stats_file, "w") as f:
+            json.dump(stats, f)
 
     def update(self, data_type: str, values: np.ndarray, sample_limit: int = 10000):
         """
@@ -138,18 +165,27 @@ class ValueTracker:
             return
 
         with self.lock:
-            # Update min and max
             cell_min = float(np.min(valid_values))
             cell_max = float(np.max(valid_values))
+            updated = False
 
-            self.min_values[data_type] = min(self.min_values[data_type], cell_min)
-            self.max_values[data_type] = max(self.max_values[data_type], cell_max)
-            cell_sum = float(np.sum(valid_values))
-            cell_count = len(valid_values)
-            self.sum_values[data_type] += cell_sum
-            self.count_values[data_type] += cell_count
-            if data_type == "nightlights":  # Only increment once per cell
+            if cell_min < self.min_values[data_type]:
+                self.min_values[data_type] = cell_min
+                updated = True
+            if cell_max > self.max_values[data_type]:
+                self.max_values[data_type] = cell_max
+                updated = True
+
+            # Update sum and count
+            self.sum_values[data_type] += float(np.sum(valid_values))
+            self.count_values[data_type] += len(valid_values)
+            if data_type == "nightlights":
                 self.cell_count += 1
+            self.avg = self.sum_values[data_type] / self.count_values[data_type]
+
+            # Save to file only if min/max changed
+            if updated:
+                self._save_stats()
 
     def get_statistics(self):
         """
@@ -163,7 +199,6 @@ class ValueTracker:
 
             for data_type in self.max_values:
                 count = self.count_values[data_type]
-                avg = self.sum_values[data_type] / count if count > 0 else None
                 stats[data_type] = {
                     "min": (
                         self.min_values[data_type]
@@ -175,7 +210,7 @@ class ValueTracker:
                         if self.max_values[data_type] != float("-inf")
                         else None
                     ),
-                    "avg": avg,
+                    "avg": self.avg,
                     "sample_count": count,
                     "cell_count": self.cell_count,
                 }
@@ -866,7 +901,7 @@ def process_viirs_cell_optimized(
             target_crs=target_crs,
             session=session,
             cell_id=cell_id,
-            failure_logger=failure_logger,  # Pass the failure logger
+            failure_logger=failure_logger,
         )
 
         if not band_arrays:
@@ -933,7 +968,7 @@ def process_viirs_cell_optimized(
             f"Successfully processed cell {cell_id} for {country_name} in {year}"
         )
         memory_diff = measure_memory_usage(before=False, cell_id=cell_id)
-        logger.info(f"Memory used for cell {cell_id}: {memory_diff:.4f} MB")
+        logger.debug(f"Memory used for cell {cell_id}: {memory_diff:.4f} MB")
         del band_arrays
         gc.collect()
         return cell_id, True
@@ -1577,7 +1612,7 @@ def save_viirs_cell_metadata(
 
         json.dump(metadata, f, indent=2)
 
-    logger.info(f"Saved comprehensive metadata to {metadata_file}")
+    logger.debug(f"Saved comprehensive metadata to {metadata_file}")
 
 
 # Add to viirs.py
@@ -1882,7 +1917,7 @@ def cleanup_processing_files(output_dir, country_name, year):
                     f"Error cleaning up .processing file in {cell_dir.name}: {e}"
                 )
 
-    logger.info(
+    logger.debug(
         f"Cleaned up {cleaned_count} processing files for {country_name}, year {year}"
     )
 

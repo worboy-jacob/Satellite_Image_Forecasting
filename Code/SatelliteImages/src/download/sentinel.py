@@ -877,7 +877,7 @@ def process_sentinel_cell_optimized(
             f"Successfully processed cell {cell_id} for {country_name} in {year}"
         )
         memory_diff = measure_memory_usage(before=False, cell_id=cell_id)
-        logger.info(f"Memory used for cell {cell_id}: {memory_diff:.4f} MB")
+        logger.debug(f"Memory used for cell {cell_id}: {memory_diff:.4f} MB")
 
         del band_arrays
         gc.collect()
@@ -1617,7 +1617,7 @@ def cleanup_processing_files(output_dir, country_name, year):
                     f"Error cleaning up .processing file in {cell_dir.name}: {e}"
                 )
 
-    logger.info(
+    logger.debug(
         f"Cleaned up {cleaned_count} processing files for {country_name}, year {year}"
     )
 
@@ -2149,7 +2149,7 @@ def save_cell_metadata(
 
         json.dump(metadata, f, indent=2)
 
-    logger.info(f"Saved comprehensive metadata to {metadata_file}")
+    logger.debug(f"Saved comprehensive metadata to {metadata_file}")
 
 
 # Monkey patch ee.data methods to count requests
