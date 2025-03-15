@@ -427,7 +427,7 @@ def download_viirs_for_country_year(
             args=(
                 progress_queue,
                 len(cells_to_process),
-                f"Processing {country_name} {year}",
+                f"{country_name} {year}",
                 progress_thread_stop,
             ),
             daemon=True,
