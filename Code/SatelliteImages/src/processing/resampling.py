@@ -286,7 +286,7 @@ def process_and_save_bands(
     if processed_data:
         npz_path = cell_dir / f"processed_data.npz"
         np.savez_compressed(npz_path, **processed_data)
-        logger.info(f"Saved processed data to {npz_path}")
+        logger.debug(f"Saved processed Sentinel-2 data to {npz_path}")
         return npz_path
     else:
         logger.warning(f"No processed data to save for cell {cell_id}")
@@ -581,7 +581,7 @@ def process_and_save_viirs_bands(
 
             npz_path = cell_dir / f"processed_data.npz"
             np.savez_compressed(npz_path, **processed_data)
-            logger.info(f"Saved processed VIIRS data to {npz_path}")
+            logger.debug(f"Saved processed VIIRS data to {npz_path}")
             for key in list(processed_data.keys()):
                 processed_data[key] = None
             processed_data.clear()
