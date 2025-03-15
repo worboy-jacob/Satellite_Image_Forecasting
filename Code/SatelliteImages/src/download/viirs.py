@@ -167,14 +167,11 @@ class ValueTracker:
         with self.lock:
             cell_min = float(np.min(valid_values))
             cell_max = float(np.max(valid_values))
-            updated = False
 
             if cell_min < self.min_values[data_type]:
                 self.min_values[data_type] = cell_min
-                updated = True
             if cell_max > self.max_values[data_type]:
                 self.max_values[data_type] = cell_max
-                updated = True
 
             # Update sum and count
             self.sum_values[data_type] += float(np.sum(valid_values))
@@ -183,9 +180,7 @@ class ValueTracker:
                 self.cell_count += 1
             self.avg = self.sum_values[data_type] / self.count_values[data_type]
 
-            # Save to file only if min/max changed
-            if updated:
-                self._save_stats()
+            self._save_stats()
 
     def get_statistics(self):
         """
