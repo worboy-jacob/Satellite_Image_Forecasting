@@ -178,7 +178,7 @@ class ValueTracker:
             self.count_values[data_type] += len(valid_values)
             if data_type == "nightlights":
                 self.cell_count += 1
-            self.avg = self.sum_values[data_type] / self.count_values[data_type]
+            self.avg_values = self.sum_values[data_type] / self.count_values[data_type]
 
             self._save_stats()
 
