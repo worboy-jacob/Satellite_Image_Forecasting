@@ -2033,10 +2033,19 @@ def calculate_optimal_workers(config):
         # Standard calculation for higher CPU usage
         cpu_based_limit = max(cpu_count * 2, 4)
 
-    # Memory-based limit
+    # Memory-based limit - improved calculation
+    total_memory_gb = psutil.virtual_memory().total / (1024**3)
     available_memory_gb = psutil.virtual_memory().available / (1024**3)
-    memory_per_worker = config.get("memory_per_worker_gb", 0.7)
-    memory_based_limit = max(int(available_memory_gb / memory_per_worker), 4)
+    usable_memory_percentage = 0.9
+    usable_memory_gb = min(
+        total_memory_gb * usable_memory_percentage,
+        available_memory_gb * 0.95,
+    )
+    default_memory_per_worker = max(0.5, min(1.5, total_memory_gb / 20))
+    memory_per_worker = config.get("memory_per_worker_gb", default_memory_per_worker)
+    process_overhead_gb = max(1.0, total_memory_gb * 0.05)
+    worker_memory_gb = max(0.1, usable_memory_gb - process_overhead_gb)
+    memory_based_limit = max(int(worker_memory_gb / memory_per_worker), 12)
 
     # Network-based limit
     network_based_limit = max_concurrent
