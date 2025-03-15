@@ -1,20 +1,53 @@
 # scripts/main.py
 import sys
+import json
 from pathlib import Path
 import os
 
-# Add the parent directory to the path to allow imports
 sys.path.append(str(Path(__file__).parent.parent.parent.parent.parent))
 
 from src.utils.logging_config import setup_logging
 from src.utils.config import Config
-from src.utils.paths import get_base_dir, find_shapefile, get_config_dir
+from src.utils.paths import (
+    get_base_dir,
+    find_shapefile,
+    get_config_dir,
+    get_processed_pairs_file,
+)
 from src.grid.grid_generator import get_or_create_grid
 from src.download.sentinel import download_sentinel_for_country_year
 from src.download.viirs import download_viirs_for_country_year
 from src.download.repair_failures import repair_country_year_failures
 from src.download.repair_failures import scan_for_missing_data
-from src.fusion.data_fusion import combine_sentinel_viirs_data, DataIntegrityChecker
+from src.fusion.data_fusion import (
+    combine_sentinel_viirs_data,
+    scan_for_missing_data_combined,
+)
+
+
+def load_processed_pairs():
+    """Load the set of processed country-year pairs from JSON file."""
+    processed_pairs_file = get_processed_pairs_file()
+    if processed_pairs_file.exists():
+        with open(processed_pairs_file, "r") as f:
+            return set(json.load(f))
+    return set()
+
+
+def save_processed_pair(country_name, year):
+    """Save a processed country-year pair to the JSON file."""
+    pair_key = f"{country_name}_{year}"
+    processed_pairs = load_processed_pairs()
+    processed_pairs.add(pair_key)
+
+    with open(get_processed_pairs_file(), "w") as f:
+        json.dump(list(processed_pairs), f)
+
+
+def is_pair_processed(country_name, year):
+    """Check if a country-year pair has been processed."""
+    pair_key = f"{country_name}_{year}"
+    return pair_key in load_processed_pairs()
 
 
 def main():
@@ -81,6 +114,15 @@ def main():
                     grid_gdf=grid_gdf,
                 )
 
+        for country in countries:
+            country_name = country["name"]
+            years = country.get("years", [])
+            for year in years:
+                if is_pair_processed(country_name, year):
+                    logger.info(
+                        f"Skipping already processed {country_name}, year {year}"
+                    )
+                    continue
                 # Scan for missing data in Sentinel files
                 logger.info(
                     f"Scanning for missing data in Sentinel files for {country_name}, year {year}"
@@ -120,63 +162,16 @@ def main():
                     grid_gdf=grid_gdf,
                     config=config,
                 )
-                # Scan for missing data in Sentinel files
-                logger.info(
-                    f"Scanning for missing data again in Sentinel files for {country_name}, year {year}"
-                )
-        # Run comprehensive data integrity check across all processed data
-        logger.info("Running comprehensive data integrity check for all processed data")
-        checker = DataIntegrityChecker(
-            countries=[country["name"] for country in countries],
-            years=list(
-                set(year for country in countries for year in country.get("years", []))
-            ),
-            max_workers=config.get("max_workers", 4),
-        )
 
-        # Run the check and get results
-        integrity_results = checker.check_all_data()
+                save_processed_pair(country_name, year)
+                logger.info(f"Marked {country_name}, year {year} as processed")
 
-        # Log summary of integrity results
-        sentinel_total = integrity_results["sentinel"]["total_cells"]
-        sentinel_issues = (
-            integrity_results["sentinel"]["cells_with_missing_bands"]
-            + integrity_results["sentinel"]["cells_with_empty_arrays"]
-            + integrity_results["sentinel"]["cells_with_errors"]
-        )
+        logger.info("Combining data")
+        combine_sentinel_viirs_data()
+        logger.info("Scanning combined data")
+        result = scan_for_missing_data_combined(max_workers=8)
+        logger.info(f"Scan for missing data completed with result: {result}")
 
-        viirs_total = integrity_results["viirs"]["total_cells"]
-        viirs_issues = (
-            integrity_results["viirs"]["cells_with_missing_bands"]
-            + integrity_results["viirs"]["cells_with_empty_arrays"]
-            + integrity_results["viirs"]["cells_with_errors"]
-        )
-
-        matching_percent = 0
-        if integrity_results["matching"]["total_cells"] > 0:
-            matching_percent = (
-                integrity_results["matching"]["matching_cells"]
-                / integrity_results["matching"]["total_cells"]
-                * 100
-            )
-
-        logger.info(f"Data integrity check complete:")
-        logger.info(
-            f"Sentinel: {sentinel_issues}/{sentinel_total} cells have issues ({sentinel_issues/max(1, sentinel_total)*100:.1f}%)"
-        )
-        logger.info(
-            f"VIIRS: {viirs_issues}/{viirs_total} cells have issues ({viirs_issues/max(1, viirs_total)*100:.1f}%)"
-        )
-        logger.info(
-            f"Matching: {integrity_results['matching']['matching_cells']}/{integrity_results['matching']['total_cells']} cells match ({matching_percent:.1f}%)"
-        )
-        logger.info(f"Detailed reports saved to {checker.output_dir}")
-        # Combine Sentinel and VIIRS data after repairs and scans
-        logger.info(
-            f"Combining Sentinel and VIIRS data for {country_name}, year {year}"
-        )
-
-        # Log success
         logger.info("Pipeline execution completed successfully")
 
     except Exception as e:
