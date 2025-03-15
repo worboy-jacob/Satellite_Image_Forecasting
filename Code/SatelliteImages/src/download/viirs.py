@@ -207,7 +207,7 @@ class ValueTracker:
                         if self.max_values[data_type] != float("-inf")
                         else None
                     ),
-                    "avg": self.avg,
+                    "avg": self.avg_values,
                     "sample_count": count,
                     "cell_count": self.cell_count,
                 }
