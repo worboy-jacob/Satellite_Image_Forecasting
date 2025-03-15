@@ -10,9 +10,13 @@ def get_base_dir() -> Path:
     return BASE_DIR
 
 
+def get_SatelliteImage_dir() -> Path:
+    return get_base_dir() / "Code" / "SatelliteImages"
+
+
 def get_logs_dir() -> Path:
     """Return the logs directory."""
-    return BASE_DIR / "Code" / "SatelliteImages" / "logs"
+    return get_SatelliteImage_dir() / "logs"
 
 
 def get_data_dir() -> Path:
@@ -22,7 +26,7 @@ def get_data_dir() -> Path:
 
 def get_config_dir() -> Path:
     """Return the config directory."""
-    return BASE_DIR / "Code" / "SatelliteImages" / "config"
+    return get_SatelliteImage_dir() / "config"
 
 
 def get_shapefiles_dir() -> Path:
@@ -60,3 +64,7 @@ def find_shapefile(country_name: str) -> Path:
         )
 
     return shp_files[0]
+
+
+def get_processed_pairs_file() -> Path:
+    return get_results_dir() / "processed_country_year_pairs.json"
