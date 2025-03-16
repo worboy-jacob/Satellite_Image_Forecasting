@@ -228,7 +228,7 @@ class ValueTracker:
                     f"{data_type.capitalize()}: "
                     f"Min={data_stats['min']:.4f}, "
                     f"Max={data_stats['max']:.4f}, "
-                    f"Avg={f'{data_stats['avg']:.4f}' if data_stats['avg'] is not None else 'N/A'}"
+                    f"Avg={data_stats['avg']:.4f if data_stats['avg'] is not None else 'N/A'}"
                 )
 
                 if data_type == "nightlights":
