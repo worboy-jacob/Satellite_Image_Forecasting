@@ -224,13 +224,19 @@ class ValueTracker:
 
         for data_type, data_stats in stats.items():
             if data_stats["min"] is not None and data_stats["max"] is not None:
+                avg_value = (
+                    data_stats["avg"].get(data_type)
+                    if isinstance(data_stats["avg"], dict)
+                    else data_stats["avg"]
+                )
+
+                avg_display = f"{avg_value:.4f}" if avg_value is not None else "N/A"
                 logger.info(
                     f"{data_type.capitalize()}: "
                     f"Min={data_stats['min']:.4f}, "
                     f"Max={data_stats['max']:.4f}, "
-                    f"Avg={data_stats['avg']:.4f if data_stats['avg'] is not None else 'N/A'}"
+                    f"Avg={avg_display}"
                 )
-
                 if data_type == "nightlights":
                     # For nightlights, also log the log-transformed values
                     log_min = np.log1p(max(0, data_stats["min"]))
