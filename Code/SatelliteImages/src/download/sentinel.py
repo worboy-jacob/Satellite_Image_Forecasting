@@ -844,6 +844,7 @@ def process_sentinel_cell_optimized(
                 error_msg = f"No or not enough data downloaded for {country_name} cell {cell_id} in {year}"
                 logger.warning(error_msg)
                 if not trying_early_year:
+                    logger.info(f"Retrying with other dataset")
                     trying_early_year = True
                     continue
 
