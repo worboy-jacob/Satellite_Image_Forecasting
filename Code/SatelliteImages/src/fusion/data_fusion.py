@@ -378,14 +378,14 @@ def scan_for_missing_data_combined(
     if expected_bands is None:
         expected_bands = {
             "combined_data.npz": [
-                "rgb",
-                "nir",
-                "swir1",
-                "swir2",
-                "ndvi",
-                "built_up",
-                "nightlights",
-                "gradient",
+                "sentinel_rgb",
+                "sentinel_nir",
+                "sentinel_swir1",
+                "sentinel_swir2",
+                "sentinel_ndvi",
+                "sentinel_built_up",
+                "viirs_nightlights",
+                "viirs_gradient",
             ]
         }
 
