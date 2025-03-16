@@ -11,8 +11,9 @@ import pandas as pd
 import sys
 from src.utils.paths import get_results_dir
 import traceback
+import gc
 
-logger = logging.getLogger("data_combining")
+logger = logging.getLogger("image_processing")
 for handler in logger.handlers:
     handler.flush = sys.stdout.flush
 
@@ -21,21 +22,24 @@ def combine_sentinel_viirs_data(
     max_workers: int = 8,
     skip_existing: bool = True,
     delete_originals: bool = True,
+    countries: List[str] = None,
+    years: List[int] = None,
 ) -> Dict[str, int]:
     """
-    Combine Sentinel and VIIRS data for all cells.
+    Combine Sentinel and VIIRS data for specified countries and years.
 
     Args:
-        output_dir: Directory to save combined data (defaults to results/Images/Combined)
-        countries: List of countries to process (defaults to all available)
-        years: List of years to process (defaults to all available)
         max_workers: Maximum number of parallel workers
         skip_existing: Skip cells that already have combined data
         delete_originals: Delete original npz files after successful combination
+        countries: List of countries to process (defaults to all available)
+        years: List of years to process (defaults to all available)
 
     Returns:
         Dictionary with processing statistics
     """
+    # Clean up before starting
+    gc.collect()
 
     output_dir = get_results_dir() / "Images" / "Combined"
 
@@ -46,14 +50,19 @@ def combine_sentinel_viirs_data(
     sentinel_base_dir = get_results_dir() / "Images" / "Sentinel"
     viirs_base_dir = get_results_dir() / "Images" / "VIIRS"
 
-    countries = set()
+    available_countries = set()
     # Find all countries with both Sentinel and VIIRS data
     for country_dir in sentinel_base_dir.iterdir():
         if country_dir.is_dir() and (viirs_base_dir / country_dir.name).exists():
-            countries.add(country_dir.name)
-    countries = sorted(list(countries))
+            available_countries.add(country_dir.name)
 
-    logger.info(f"Found {len(countries)} countries to process")
+    # Filter countries if specified
+    if countries:
+        countries_to_process = [c for c in countries if c in available_countries]
+    else:
+        countries_to_process = sorted(list(available_countries))
+
+    logger.info(f"Found {len(countries_to_process)} countries to process")
 
     # Initialize statistics
     stats = {
@@ -67,7 +76,7 @@ def combine_sentinel_viirs_data(
     }
 
     # Process each country
-    for country in countries:
+    for country in countries_to_process:
         logger.info(f"Processing country: {country}")
 
         country_years = set()
@@ -83,14 +92,19 @@ def combine_sentinel_viirs_data(
             if year_dir.is_dir() and year_dir.name.isdigit():
                 if (viirs_country_dir / year_dir.name).exists():
                     country_years.add(int(year_dir.name))
-        country_years = sorted(list(country_years))
 
-        if not country_years:
+        # Filter years if specified
+        if years:
+            years_to_process = [y for y in years if y in country_years]
+        else:
+            years_to_process = sorted(list(country_years))
+
+        if not years_to_process:
             logger.warning(f"No years found for country {country}")
             continue
 
         # Process each year
-        for year in country_years:
+        for year in years_to_process:
             logger.info(f"Processing {country}, year {year}")
 
             # Get directories for this country-year
@@ -164,46 +178,71 @@ def combine_sentinel_viirs_data(
                 logger.info(f"No cells to process for {country} {year}")
                 continue
 
-            # Process tasks in parallel
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=max_workers
-            ) as executor:
-                futures = {
-                    executor.submit(
-                        _combine_single_cell,
-                        cell_id,
-                        sentinel_file,
-                        viirs_file,
-                        combined_file,
-                        delete_originals,
-                    ): cell_id
-                    for cell_id, sentinel_file, viirs_file, combined_file, delete_originals in tasks
-                }
+            # Process tasks in batches
+            batch_size = 500  # Process 500 cells at a time
+            for i in range(0, len(tasks), batch_size):
+                batch = tasks[i : i + batch_size]
+                logger.info(
+                    f"Processing batch {i//batch_size + 1}/{(len(tasks) + batch_size - 1)//batch_size}"
+                )
 
-                # Process results as they complete
-                for future in tqdm(
-                    concurrent.futures.as_completed(futures),
-                    total=len(futures),
-                    desc=f"Combining {country} {year}",
-                ):
-                    cell_id = futures[future]
-                    try:
-                        result = future.result()
-                        stats["total_cells_processed"] += 1
+                # Process batch in parallel
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=max_workers
+                ) as executor:
+                    futures = {
+                        executor.submit(
+                            _combine_single_cell,
+                            cell_id,
+                            sentinel_file,
+                            viirs_file,
+                            combined_file,
+                            delete_originals,
+                        ): cell_id
+                        for cell_id, sentinel_file, viirs_file, combined_file, delete_originals in batch
+                    }
 
-                        if result["status"] == "success":
-                            stats["cells_successfully_combined"] += 1
-                            if result.get("originals_deleted", False):
-                                stats["originals_deleted"] += 1
-                        elif result["status"] == "missing_sentinel":
-                            stats["cells_with_missing_sentinel"] += 1
-                        elif result["status"] == "missing_viirs":
-                            stats["cells_with_missing_viirs"] += 1
-                        elif result["status"] == "error":
+                    # Process results as they complete
+                    for future in tqdm(
+                        concurrent.futures.as_completed(futures),
+                        total=len(futures),
+                        desc=f"Combining {country} {year} batch {i//batch_size + 1}",
+                    ):
+                        cell_id = futures[future]
+                        try:
+                            result = future.result()
+                            stats["total_cells_processed"] += 1
+
+                            if result["status"] == "success":
+                                stats["cells_successfully_combined"] += 1
+                                if result.get("originals_deleted", False):
+                                    stats["originals_deleted"] += 1
+                            elif result["status"] == "missing_sentinel":
+                                stats["cells_with_missing_sentinel"] += 1
+                            elif result["status"] == "missing_viirs":
+                                stats["cells_with_missing_viirs"] += 1
+                            elif result["status"] == "error":
+                                stats["cells_with_errors"] += 1
+
+                            # Explicitly delete the result to free memory
+                            del result
+
+                            # Periodically force garbage collection during batch processing
+                            if stats["total_cells_processed"] % 100 == 0:
+                                gc.collect()
+
+                        except Exception as e:
+                            logger.error(f"Error processing cell {cell_id}: {e}")
                             stats["cells_with_errors"] += 1
-                    except Exception as e:
-                        logger.error(f"Error processing cell {cell_id}: {e}")
-                        stats["cells_with_errors"] += 1
+
+                # Force garbage collection after each batch
+                gc.collect()
+                logger.info(
+                    f"Completed batch {i//batch_size + 1}, processed {i+len(batch)}/{len(tasks)} cells"
+                )
+
+    # Final garbage collection
+    gc.collect()
 
     # Log final statistics
     logger.info(f"Data combination complete. Stats: {stats}")
@@ -236,7 +275,7 @@ def _combine_single_cell(
     Returns:
         Dictionary with processing result
     """
-    logger = logging.getLogger("data_combiner")
+    logger = logging.getLogger("image_processing")
     result = {"cell_id": cell_id}
 
     try:
@@ -318,7 +357,9 @@ def _combine_single_cell(
 
 def scan_for_missing_data_combined(
     expected_bands: Optional[Dict[str, List[str]]] = None,
-    max_workers: int = 8,  # Number of parallel workers
+    max_workers: int = 12,  # Number of parallel workers
+    countries: List[str] = None,
+    years: List[int] = None,
 ) -> None:
     """
     Scan processed data files to identify missing bands or indices and create failure logs.
@@ -327,8 +368,10 @@ def scan_for_missing_data_combined(
     Args:
         expected_bands: Dictionary mapping data types to lists of expected bands/indices
         max_workers: Maximum number of parallel workers
+        countries: List of countries to process (defaults to all available)
+        years: List of years to process (defaults to all available)
     """
-    logger = logging.getLogger("data_scanner")
+    logger = logging.getLogger("image_processing")
     logger.info(f"Scanning for missing data in combined set")
 
     # Define default expected bands if not provided
@@ -361,12 +404,17 @@ def scan_for_missing_data_combined(
         failure_log_file.unlink()
         logger.info(f"Deleted existing failure log: {failure_log_file}")
 
-    countries = []
-    # Find all countries with both Sentinel and VIIRS data
+    available_countries = []
+    # Find all countries with combined data
     for country_dir in base_dir.iterdir():
         if country_dir.is_dir() and country_dir.name != "failures":
-            countries.add(country_dir.name)
-    countries = sorted(list(countries))
+            available_countries.append(country_dir.name)
+
+    # Filter countries if specified
+    if countries:
+        countries_to_process = [c for c in countries if c in available_countries]
+    else:
+        countries_to_process = sorted(available_countries)
 
     # Define the worker function for parallel processing
     def process_cell_dir_combined(cell_dir, country_name, year):
@@ -459,25 +507,32 @@ def scan_for_missing_data_combined(
     failures_count = 0
     success_count = 0
 
-    for country in countries:
+    for country in countries_to_process:
         logger.info(f"Scanning country: {country}")
         country_years = []
         country_dir = base_dir / country
         for year_dir in country_dir.iterdir():
             if year_dir.is_dir() and year_dir.name.isdigit():
-                country_years.append(year_dir.name)
-        country_years = sorted(country_years)
+                country_years.append(int(year_dir.name))
 
-        if not country_years:
+        # Filter years if specified
+        if years:
+            years_to_process = [y for y in years if y in country_years]
+        else:
+            years_to_process = sorted(country_years)
+
+        if not years_to_process:
             logger.warning(f"No years found for {country}")
             continue
-        for year in country_years:
+
+        for year in years_to_process:
             logger.info(f"Processing {country}: {year}")
             country_year_dir = country_dir / str(year)
 
             if not country_year_dir.exists():
                 logger.warning(f"Missing previously found {country} {year} directory")
                 continue
+
             cell_dirs = list(country_year_dir.glob("cell_*"))
             if not cell_dirs:
                 logger.warning(f"No cells found for {country} {year}")
@@ -516,3 +571,5 @@ def scan_for_missing_data_combined(
         f"Scanning complete. Found {failures_count} cells with missing or invalid data. "
         f"Successfully verified {success_count} cells."
     )
+
+    return {"failures": failures_count, "success": success_count}
