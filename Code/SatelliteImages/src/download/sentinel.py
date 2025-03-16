@@ -860,7 +860,8 @@ def process_sentinel_cell_optimized(
                 if placeholder_file and placeholder_file.exists():
                     placeholder_file.unlink()
                 return cell_id, False
-
+            if trying_early_year:
+                band_arrays = rescale_early_year_data(band_arrays)
             try:
                 save_band_arrays(
                     band_arrays=band_arrays,
@@ -1237,22 +1238,24 @@ def download_sentinel_data_optimized(
 
         logger.debug(f"{cell_id} check of total images: {total_images}")
         if not selected_collections or total_images < 10:
-            logger.warning(f"No images selected for {year}")
-            if failure_logger and early_year:
-                failure_logger.log_failure(
-                    cell_id,
-                    "no_images_error",
-                    f"No images selected for {year}",
-                    {"monthly_counts": monthly_counts},
+            if early_year and total_images == 0:
+                logger.warning(f"No images selected for {cell_id} {year}")
+                if failure_logger:
+                    failure_logger.log_failure(
+                        cell_id,
+                        "no_images_error",
+                        f"No images selected for {year}",
+                        {"monthly_counts": monthly_counts},
+                    )
+                return None, True
+            elif not early_year:
+                logger.warning(f"Too few images for {cell_id}, trying other database")
+                return None, True
+            else:
+                logger.warning(
+                    f"Too few images {total_images} for {cell_id} but continuing anyway."
                 )
-            return None, True
 
-        merged_collection = selected_collections[0]
-        for collection in selected_collections[1:]:
-            merged_collection = merged_collection.merge(collection)
-
-        # Get the total number of images
-        total_images = merged_collection.size().getInfo()
         logger.info(f"Final image count for cell: {cell_id} {year}: {total_images}")
 
         # Convert grid cell to WGS84 for Earth Engine region definition
@@ -2530,3 +2533,50 @@ def count_total_images(collections):
             continue
 
     return total_count
+
+
+def rescale_early_year_data(band_arrays):
+    """
+    Rescale data from early year collection to match the scale of standard Sentinel-2 data.
+
+    Args:
+        band_arrays: Dictionary of band arrays
+
+    Returns:
+        Dictionary of rescaled band arrays
+    """
+
+    rescaled_arrays = {}
+
+    # Approximate scaling factors based on the metadata comparison
+    # These values might need adjustment based on further analysis
+    scaling_factors = {
+        "B1": 10000,
+        "B2": 10000,
+        "B3": 10000,
+        "B4": 10000,
+        "B5": 10000,
+        "B6": 10000,
+        "B7": 10000,
+        "B8": 10000,
+        "B8A": 10000,
+        "B9": 10000,
+        "B10": 10000,
+        "B11": 10000,
+        "B12": 10000,
+    }
+
+    for band_name, array in band_arrays.items():
+        if band_name in scaling_factors:
+            # Apply scaling
+            scale = scaling_factors[band_name]
+
+            # Convert to float for multiplication then back to original dtype
+            scaled_array = array.astype(np.float32) * scale
+
+            rescaled_arrays[band_name] = scaled_array
+        else:
+            # Keep bands that don't need rescaling
+            rescaled_arrays[band_name] = array
+
+    return rescaled_arrays
