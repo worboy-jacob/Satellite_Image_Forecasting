@@ -636,7 +636,6 @@ def create_optimized_session(max_workers=None, use_high_volume=True):
     return session
 
 
-# Use LRU cache for image collections
 @dynamic_lru_cache
 def get_sentinel_collection_cached(
     bounds_key, start_date, end_date, cloud_threshold, bands_key, early_year
@@ -650,6 +649,7 @@ def get_sentinel_collection_cached(
         end_date: End date
         cloud_threshold: Cloud threshold
         bands_key: String representation of bands
+        early_year: Whether to use early year collection
 
     Returns:
         ee.ImageCollection
@@ -664,25 +664,51 @@ def get_sentinel_collection_cached(
     # Get the collection
     if early_year:
         collection = ee.ImageCollection("NASA/HLS/HLSS30/v002")
+
+        # Filter by date and location
+        collection = collection.filterDate(start_date, end_date)
+        collection = collection.filterBounds(ee_geometry)
+
+        # Filter by cloud cover - using CLOUD_COVERAGE for early years
+        collection = collection.filter(ee.Filter.lt("CLOUD_COVERAGE", cloud_threshold))
+
+        # Define cloud masking function for early years using Fmask
+        def mask_hls_clouds(image):
+            fmask = image.select("Fmask")
+            # Mask out pixels where:
+            # Bit 1 (Cloud) = 1 OR
+            # Bit 3 (Cloud shadow) = 1
+            cloud_bit = 1 << 1  # Bit 1 for cloud
+            shadow_bit = 1 << 3  # Bit 3 for cloud shadow
+            mask = (
+                fmask.bitwiseAnd(cloud_bit)
+                .eq(0)
+                .And(fmask.bitwiseAnd(shadow_bit).eq(0))
+            )
+            return image.updateMask(mask)
+
+        # Apply cloud masking for early years
+        collection = collection.map(mask_hls_clouds)
     else:
         collection = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
 
-    # Filter by date and location
-    collection = collection.filterDate(start_date, end_date)
-    collection = collection.filterBounds(ee_geometry)
+        # Filter by date and location
+        collection = collection.filterDate(start_date, end_date)
+        collection = collection.filterBounds(ee_geometry)
 
-    # Filter by cloud cover
-    collection = collection.filter(
-        ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", cloud_threshold)
-    )
+        # Filter by cloud cover
+        collection = collection.filter(
+            ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", cloud_threshold)
+        )
 
-    def mask_s2_clouds(image):
-        scl = image.select("SCL")
-        mask = scl.neq(3).And(scl.neq(8)).And(scl.neq(9)).And(scl.neq(10))
-        return image.updateMask(mask)
+        # Define cloud masking function for Sentinel-2
+        def mask_s2_clouds(image):
+            scl = image.select("SCL")
+            mask = scl.neq(3).And(scl.neq(8)).And(scl.neq(9)).And(scl.neq(10))
+            return image.updateMask(mask)
 
-    # Apply cloud masking
-    collection = collection.map(mask_s2_clouds)
+        # Apply cloud masking
+        collection = collection.map(mask_s2_clouds)
 
     # Select bands if specified
     if bands and bands != "None":
@@ -776,111 +802,119 @@ def process_sentinel_cell_optimized(
     cell_id = cell["cell_id"]
     cell_gdf = grid_gdf.iloc[[idx]]
     placeholder_file = None
-
+    retry = True
+    trying_early_year = early_year
     try:
-        if (
-            hasattr(session, "_creation_time")
-            and time.time() - session._creation_time > 1800
-        ):  # 30 minutes
-            logger.info(f"Session for cell {cell_id} is stale, creating fresh session")
-            session = create_optimized_session(max_workers=20, use_high_volume=True)
-        measure_memory_usage(before=True, cell_id=cell_id)
-        logger.info(f"Processing cell {cell_id} for {country_name}, year {year}")
-
-        # Create output directory early to mark as "in progress"
-        cell_dir = output_dir / country_name / str(year) / f"cell_{cell_id}"
-        cell_dir.mkdir(parents=True, exist_ok=True)
-
-        # Create a placeholder file to indicate processing has started
-        placeholder_file = cell_dir / ".processing"
-        with open(placeholder_file, "w") as f:
-            f.write(f"Started: {datetime.now().isoformat()}")
-        band_arrays = download_sentinel_data_optimized(
-            grid_cell=cell_gdf,
-            year=year,
-            bands=bands,
-            cloud_threshold=cloud_threshold,
-            composite_method=composite_method,
-            target_crs=target_crs,
-            session=session,
-            early_year=early_year,
-            cell_id=cell_id,
-            failure_logger=failure_logger,  # Pass the failure logger
-        )
-
-        if not band_arrays:
-            error_msg = (
-                f"No data downloaded for {country_name} cell {cell_id} in {year}"
-            )
-            logger.warning(error_msg)
-            # Log the failure
-            if failure_logger:
-                failure_logger.log_failure(
-                    cell_id,
-                    "no_data_error",
-                    error_msg,
-                    {"bands": bands, "cloud_threshold": cloud_threshold},
+        while retry:
+            if trying_early_year:
+                retry = False
+            if (
+                hasattr(session, "_creation_time")
+                and time.time() - session._creation_time > 1800
+            ):  # 30 minutes
+                logger.info(
+                    f"Session for cell {cell_id} is stale, creating fresh session"
                 )
-            # Clean up placeholder
-            if placeholder_file and placeholder_file.exists():
-                placeholder_file.unlink()
-            return cell_id, False
+                session = create_optimized_session(max_workers=20, use_high_volume=True)
+            measure_memory_usage(before=True, cell_id=cell_id)
+            logger.info(f"Processing cell {cell_id} for {country_name}, year {year}")
 
-        try:
-            save_band_arrays(
-                band_arrays=band_arrays,
-                output_dir=output_dir,
-                country_name=country_name,
-                cell_id=cell_id,
-                year=year,
+            # Create output directory early to mark as "in progress"
+            cell_dir = output_dir / country_name / str(year) / f"cell_{cell_id}"
+            cell_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create a placeholder file to indicate processing has started
+            placeholder_file = cell_dir / ".processing"
+            with open(placeholder_file, "w") as f:
+                f.write(f"Started: {datetime.now().isoformat()}")
+            band_arrays, missing = download_sentinel_data_optimized(
                 grid_cell=cell_gdf,
-                target_crs=target_crs,
-                early_year=early_year,
-            )
-        except Exception as e:
-            error_msg = f"Error saving band arrays for cell {cell_id}: {str(e)}"
-            logger.error(error_msg)
-            if failure_logger:
-                failure_logger.log_failure(
-                    cell_id, "save_error", str(e), {"band_count": len(band_arrays)}
-                )
-            if placeholder_file and placeholder_file.exists():
-                placeholder_file.unlink()
-            return cell_id, False
-        try:
-            save_cell_metadata(
-                country_name=country_name,
-                cell_id=cell_id,
                 year=year,
                 bands=bands,
-                cell_gdf=cell_gdf,
-                output_dir=output_dir,
-                composite_method=composite_method,
                 cloud_threshold=cloud_threshold,
-                band_arrays=band_arrays,
-                early_year=early_year,
+                composite_method=composite_method,
+                target_crs=target_crs,
+                session=session,
+                early_year=trying_early_year,
+                cell_id=cell_id,
+                failure_logger=failure_logger,  # Pass the failure logger
             )
-        except Exception as e:
-            error_msg = f"Error saving metadata for cell {cell_id}: {str(e)}"
-            logger.error(error_msg)
-            if failure_logger:
-                failure_logger.log_failure(cell_id, "metadata_error", str(e), {})
+
+            if not band_arrays or missing:
+                error_msg = f"No or not enough data downloaded for {country_name} cell {cell_id} in {year}"
+                logger.warning(error_msg)
+                if not trying_early_year:
+                    trying_early_year = True
+                    continue
+
+                # Log the failure
+                if failure_logger:
+                    failure_logger.log_failure(
+                        cell_id,
+                        "no_data_error",
+                        error_msg,
+                        {"bands": bands, "cloud_threshold": cloud_threshold},
+                    )
+                # Clean up placeholder
+                if placeholder_file and placeholder_file.exists():
+                    placeholder_file.unlink()
+                return cell_id, False
+
+            try:
+                save_band_arrays(
+                    band_arrays=band_arrays,
+                    output_dir=output_dir,
+                    country_name=country_name,
+                    cell_id=cell_id,
+                    year=year,
+                    grid_cell=cell_gdf,
+                    target_crs=target_crs,
+                    early_year=trying_early_year,
+                )
+            except Exception as e:
+                error_msg = f"Error saving band arrays for cell {cell_id}: {str(e)}"
+                logger.error(error_msg)
+                if failure_logger:
+                    failure_logger.log_failure(
+                        cell_id, "save_error", str(e), {"band_count": len(band_arrays)}
+                    )
+                if placeholder_file and placeholder_file.exists():
+                    placeholder_file.unlink()
+                return cell_id, False
+            try:
+                save_cell_metadata(
+                    country_name=country_name,
+                    cell_id=cell_id,
+                    year=year,
+                    bands=bands,
+                    cell_gdf=cell_gdf,
+                    output_dir=output_dir,
+                    composite_method=composite_method,
+                    cloud_threshold=cloud_threshold,
+                    band_arrays=band_arrays,
+                    early_year=trying_early_year,
+                )
+            except Exception as e:
+                error_msg = f"Error saving metadata for cell {cell_id}: {str(e)}"
+                logger.error(error_msg)
+                if failure_logger:
+                    failure_logger.log_failure(cell_id, "metadata_error", str(e), {})
+                if placeholder_file and placeholder_file.exists():
+                    placeholder_file.unlink()
+                return cell_id, False
+            # Remove placeholder file
             if placeholder_file and placeholder_file.exists():
                 placeholder_file.unlink()
-            return cell_id, False
-        # Remove placeholder file
-        if placeholder_file and placeholder_file.exists():
-            placeholder_file.unlink()
 
-        logger.info(
-            f"Successfully processed cell {cell_id} for {country_name} in {year}"
-        )
-        memory_diff = measure_memory_usage(before=False, cell_id=cell_id)
-        logger.debug(f"Memory used for cell {cell_id}: {memory_diff:.4f} MB")
+            logger.info(
+                f"Successfully processed cell {cell_id} for {country_name} in {year}"
+            )
+            memory_diff = measure_memory_usage(before=False, cell_id=cell_id)
+            logger.debug(f"Memory used for cell {cell_id}: {memory_diff:.4f} MB")
 
-        del band_arrays
-        gc.collect()
-        return cell_id, True
+            del band_arrays
+            gc.collect()
+            return cell_id, True
 
     except Exception as e:
         error_msg = f"Error processing cell {cell_id}: {str(e)}"
@@ -911,7 +945,7 @@ def download_sentinel_data_optimized(
     session=None,
     early_year: bool = False,
     failure_logger=None,
-) -> Dict[str, np.ndarray]:
+) -> Tuple[Dict[str, np.ndarray], bool]:
     """
     Optimized version of download_sentinel_data with parallel month processing.
     Exits immediately if any month processing fails with an error.
@@ -987,9 +1021,14 @@ def download_sentinel_data_optimized(
                         if count > 0:
                             try:
                                 # Sort by cloud cover (ascending)
-                                sorted_collection = collection.sort(
-                                    "CLOUDY_PIXEL_PERCENTAGE"
-                                )
+                                if early_year:
+                                    sorted_collection = collection.sort(
+                                        "CLOUD_COVERAGE"
+                                    )
+                                else:
+                                    sorted_collection = collection.sort(
+                                        "CLOUDY_PIXEL_PERCENTAGE"
+                                    )
 
                                 # Take up to images_per_month images
                                 month_selection = sorted_collection.limit(
@@ -1114,7 +1153,7 @@ def download_sentinel_data_optimized(
                     error_msg,
                     {"year": year},
                 )
-            return {}
+            return {}, False
 
         # Continue only if there were no month processing failures
         # If we have fewer than total_target images, get more from months with extras
@@ -1153,7 +1192,10 @@ def download_sentinel_data_optimized(
                     )
 
                     # Sort by cloud cover (ascending)
-                    sorted_collection = collection.sort("CLOUDY_PIXEL_PERCENTAGE")
+                    if early_year:
+                        sorted_collection = collection.sort("CLOUD_COVERAGE")
+                    else:
+                        sorted_collection = collection.sort("CLOUDY_PIXEL_PERCENTAGE")
 
                     # Skip the first images_per_month images (already selected)
                     # and take up to the number needed
@@ -1180,13 +1222,13 @@ def download_sentinel_data_optimized(
                             error_msg,
                             {"year": year, "month_idx": month_idx},
                         )
-                    return {}
+                    return {}, False
 
             # Add additional collections to selected collections
             selected_collections.extend(additional_collections)
 
         # Merge all selected collections
-        if not selected_collections:
+        if not selected_collections or len(selected_collections) < 10:
             logger.warning(f"No images selected for {year}")
             if failure_logger:
                 failure_logger.log_failure(
@@ -1195,7 +1237,7 @@ def download_sentinel_data_optimized(
                     f"No images selected for {year}",
                     {"monthly_counts": monthly_counts},
                 )
-            return None
+            return None, True
 
         merged_collection = selected_collections[0]
         for collection in selected_collections[1:]:
@@ -1278,9 +1320,9 @@ def download_sentinel_data_optimized(
                 failure_logger.log_failure(
                     cell_id, "all_bands_failed", error_msg, {"bands": bands}
                 )
-            return {}
+            return {}, False
 
-        return band_arrays
+        return band_arrays, False
 
     except Exception as e:
         error_msg = f"Error in download_sentinel_data_optimized: {e}"
@@ -1290,7 +1332,7 @@ def download_sentinel_data_optimized(
             failure_logger.log_failure(
                 cell_id, "download_data_error", str(e), {"year": year, "bands": bands}
             )
-        return {}
+        return {}, False
 
 
 def download_single_band(
