@@ -1,0 +1,3 @@
+threshold: 32
+countries: ["SN"]  # Can be ["SN"], ["GH"], or ["SN", "GH"]
+force_reprocess: false   # Set to true to reprocess existing files
