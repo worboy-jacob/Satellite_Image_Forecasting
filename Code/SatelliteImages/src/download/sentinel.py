@@ -1036,7 +1036,6 @@ def download_sentinel_data_optimized(
                                     images_per_month
                                 )
                                 month_selection_count = min(count, images_per_month)
-
                                 return (
                                     month_idx,
                                     count,
@@ -1126,7 +1125,6 @@ def download_sentinel_data_optimized(
                     if error_occurred:
                         month_failure_occurred = True
                         # Continue to collect all results but we'll exit after
-
                     monthly_counts[month_idx] = count
 
                     if month_selection is not None:
@@ -1155,7 +1153,6 @@ def download_sentinel_data_optimized(
                     {"year": year},
                 )
             return {}, False
-
         # Continue only if there were no month processing failures
         # If we have fewer than total_target images, get more from months with extras
         if total_selected < total_target:
@@ -1203,6 +1200,7 @@ def download_sentinel_data_optimized(
                     to_take = min(extras, additional_needed - additional_count)
 
                     if to_take > 0:
+                        count = collection.size().getInfo()
                         additional = sorted_collection.toList(count).slice(
                             images_per_month, images_per_month + to_take
                         )
@@ -1228,10 +1226,19 @@ def download_sentinel_data_optimized(
             # Add additional collections to selected collections
             selected_collections.extend(additional_collections)
 
-        # Merge all selected collections
-        if not selected_collections or len(selected_collections) < 10:
+        if not selected_collections or len(selected_collections) == 0:
+            total_images = 0
+        else:
+            merged_collection = selected_collections[0]
+            for collection in selected_collections[1:]:
+                merged_collection = merged_collection.merge(collection)
+            # Get the total number of images
+            total_images = merged_collection.size().getInfo()
+
+        logger.debug(f"{cell_id} check of total images: {total_images}")
+        if not selected_collections or total_images < 10:
             logger.warning(f"No images selected for {year}")
-            if failure_logger:
+            if failure_logger and early_year:
                 failure_logger.log_failure(
                     cell_id,
                     "no_images_error",
@@ -2493,3 +2500,33 @@ def progress_updater_thread(queue, total, desc, stop_event):
         # Final update to ensure we don't miss any progress
         if accumulated_progress > 0:
             pbar.update(accumulated_progress)
+
+
+def count_total_images(collections):
+    """
+    Count the total number of images across all Earth Engine ImageCollections.
+
+    Args:
+        collections: List of ee.ImageCollection objects
+
+    Returns:
+        int: Total number of images
+    """
+    total_count = 0
+
+    for collection in collections:
+        try:
+            # Get the size of each collection
+            if isinstance(collection, ee.imagecollection.ImageCollection):
+                # Use getInfo to get the actual count from the server
+                collection_size = collection.size().getInfo()
+                total_count += collection_size
+            elif isinstance(collection, list):
+                # If it's a list, recursively count its contents
+                total_count += count_total_images(collection)
+        except Exception as e:
+            logger.warning(f"Error counting images in collection: {e}")
+            # Continue with next collection rather than failing completely
+            continue
+
+    return total_count
