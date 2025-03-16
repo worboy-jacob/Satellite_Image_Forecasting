@@ -40,24 +40,9 @@ from src.processing.resampling import (
 )
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler("repair_failures.log"), logging.StreamHandler()],
-)
+logger = logging.getLogger("image_processing")
 
-# Configure logging only if not already configured
-logger = logging.getLogger("repair_tool")
-if not logger.handlers:
-    file_handler = logging.FileHandler("repair_failures.log")
-    file_handler.setFormatter(
-        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    )
-    logger.addHandler(file_handler)
-
-    # Don't add a StreamHandler here since the root logger will handle console output
-    logger.setLevel(logging.INFO)
-    logger.propagate = True  # Allow messages to propagate to the root logger
+# Make sure flush works correctly for all handlers
 for handler in logger.handlers:
     handler.flush = sys.stdout.flush
 # Constants
@@ -210,7 +195,7 @@ def repair_country_year_failures(
     Returns:
         Dictionary with repair results
     """
-    logger = logging.getLogger("repair_tool")
+    logger = logging.getLogger("image_processing")
 
     # Get the output directory
     output_dir = get_results_dir() / "Images" / data_type.capitalize()
@@ -353,9 +338,11 @@ def repair_country_year_failures(
 
         # Create a filtered grid with only the cells that had errors
         cells_to_repair_list = list(cells_to_repair)
-        repair_grid_gdf = grid_gdf[
-            grid_gdf["cell_id"].isin(cells_to_repair_list)
-        ].copy()
+        repair_grid_gdf = (
+            grid_gdf[grid_gdf["cell_id"].isin(cells_to_repair_list)]
+            .copy()
+            .reset_index(drop=True)
+        )
 
         logger.info(
             f"Created filtered grid with {len(repair_grid_gdf)} cells to repair"
@@ -473,7 +460,7 @@ def scan_for_missing_data(
     country_name: str,
     year: int,
     expected_bands: Optional[Dict[str, List[str]]] = None,
-    max_workers: int = 8,  # Number of parallel workers
+    max_workers: int = 12,  # Number of parallel workers
 ) -> None:
     """
     Scan processed data files to identify missing bands or indices and create failure logs.
@@ -488,7 +475,7 @@ def scan_for_missing_data(
                        If None, uses defaults for each data type
         max_workers: Maximum number of parallel workers
     """
-    logger = logging.getLogger("data_scanner")
+    logger = logging.getLogger("image_processing")
     logger.info(
         f"Scanning for missing data in {data_type} for {country_name}, year {year}"
     )
@@ -591,6 +578,9 @@ def scan_for_missing_data(
 
         # Load the processed data to check for missing bands
         try:
+            missing_bands = []
+            zero_bands = []
+            available_bands = []
             with np.load(processed_file) as data:
                 available_bands = set(data.files)
 
@@ -601,7 +591,6 @@ def scan_for_missing_data(
                 ]
 
                 # Check for zero-size or all-zero arrays
-                zero_bands = []
                 for band in available_bands:
                     band_data = data[band]
                     if band_data.size == 0 or np.all(band_data == 0):
@@ -628,7 +617,6 @@ def scan_for_missing_data(
                         "failure_record": failure_record,
                         "cell_failure_file": str(cell_failure_file),
                     }
-
                 return {"status": "success", "cell_id": cell_id}
 
         except Exception as e:
@@ -655,39 +643,53 @@ def scan_for_missing_data(
     skipped_count = 0
     success_count = 0
 
-    # Use ThreadPoolExecutor since this is primarily I/O bound
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [
-            executor.submit(process_cell_dir, cell_dir) for cell_dir in cell_dirs
-        ]
+    batch_size = 500  # Process 500 cells at a time
+    for i in range(0, len(cell_dirs), batch_size):
+        batch = cell_dirs[i : i + batch_size]
+        logger.info(
+            f"Processing batch {i//batch_size + 1}/{(len(cell_dirs) + batch_size - 1)//batch_size}"
+        )
 
-        # Process results as they complete
-        for future in tqdm(
-            concurrent.futures.as_completed(futures),
-            total=len(futures),
-            desc="Scanning cells",
-        ):
-            result = future.result()
-            if result is None:
-                continue
+        # Use ThreadPoolExecutor since this is primarily I/O bound
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(process_cell_dir, cell_dir) for cell_dir in batch
+            ]
 
-            if result["status"] == "skipped":
-                skipped_count += 1
-            elif result["status"] == "failure":
-                failures_count += 1
+            # Process results as they complete
+            for future in tqdm(
+                concurrent.futures.as_completed(futures),
+                total=len(futures),
+                desc=f"Scanning batch {i//batch_size + 1}",
+            ):
+                result = future.result()
+                if result is None:
+                    continue
+                if result["status"] == "skipped":
+                    skipped_count += 1
+                elif result["status"] == "failure":
+                    failures_count += 1
 
-                # Write to failure logs (need to handle file locking)
-                with open(failure_log_file, "a") as f:
-                    f.write(json.dumps(result["failure_record"]) + "\n")
+                    # Write to failure logs (need to handle file locking)
+                    with open(failure_log_file, "a") as f:
+                        f.write(json.dumps(result["failure_record"]) + "\n")
 
-                # Create cell-specific failure file
-                with open(result["cell_failure_file"], "w") as f:
-                    json.dump(result["failure_record"], f, indent=2)
+                    # Create cell-specific failure file
+                    with open(result["cell_failure_file"], "w") as f:
+                        json.dump(result["failure_record"], f, indent=2)
 
-                logger.warning(f"Cell {result['cell_id']}: Found data issues")
-            elif result["status"] == "success":
-                success_count += 1
-
+                    logger.warning(f"Cell {result['cell_id']}: Found data issues")
+                elif result["status"] == "success":
+                    success_count += 1
+                del result
+                if (skipped_count + failures_count + success_count) % 100 == 0:
+                    gc.collect()
+        # Force garbage collection after each batch
+        gc.collect()
+        logger.info(
+            f"Completed batch {i//batch_size + 1}, processed {i+len(batch)}/{len(cell_dirs)} cells"
+        )
+    gc.collect()
     logger.info(
         f"Scanning complete. Found {failures_count} cells with missing or invalid data. "
         f"Skipped {skipped_count} cells with existing failure logs. "

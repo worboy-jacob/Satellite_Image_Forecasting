@@ -13,6 +13,7 @@ from src.utils.paths import (
     find_shapefile,
     get_config_dir,
     get_processed_pairs_file,
+    get_results_dir,
 )
 from src.grid.grid_generator import get_or_create_grid
 from src.download.sentinel import download_sentinel_for_country_year
@@ -48,6 +49,163 @@ def is_pair_processed(country_name, year):
     """Check if a country-year pair has been processed."""
     pair_key = f"{country_name}_{year}"
     return pair_key in load_processed_pairs()
+
+
+def save_problematic_cells(country_name, year, sentinel_failures, viirs_failures):
+    """Save problematic cells that couldn't be repaired to a JSON file."""
+    combined_dir = get_results_dir() / "Images" / "Combined" / country_name / str(year)
+    combined_dir.mkdir(parents=True, exist_ok=True)
+
+    problematic_cells = {
+        "country": country_name,
+        "year": year,
+        "sentinel_failures": sentinel_failures,
+        "viirs_failures": viirs_failures,
+        "timestamp": str(Path(__file__).stat().st_mtime),
+    }
+
+    problematic_cells_file = combined_dir / "problematic_cells.json"
+    with open(problematic_cells_file, "w") as f:
+        json.dump(problematic_cells, f, indent=2)
+
+
+def get_failed_cells(data_type, country_name, year):
+    """Get list of cells that failed processing for a data type."""
+    failures_dir = (
+        get_results_dir()
+        / "Images"
+        / data_type.capitalize()
+        / country_name
+        / str(year)
+        / "failures"
+    )
+
+    if not failures_dir.exists():
+        return []
+
+    failure_log_file = failures_dir / "failure_log.jsonl"
+    if not failure_log_file.exists():
+        return []
+
+    failed_cells = set()
+    with open(failure_log_file, "r") as f:
+        for line in f:
+            try:
+                failure = json.loads(line.strip())
+                cell_id = failure.get("cell_id")
+                if cell_id is not None and cell_id != "global" and cell_id != "batch":
+                    # Convert string cell_id to int if needed
+                    if isinstance(cell_id, str) and cell_id.isdigit():
+                        cell_id = int(cell_id)
+                    if isinstance(cell_id, int):
+                        failed_cells.add(cell_id)
+            except json.JSONDecodeError:
+                continue
+
+    return list(failed_cells)
+
+
+def process_country_year_pair(config, country_name, year, grid_gdf, logger):
+    """Process a single country-year pair completely."""
+    max_repair_attempts = 100
+
+    # Skip if already processed
+    if is_pair_processed(country_name, year):
+        logger.info(f"Skipping already processed {country_name}, year {year}")
+        return True
+
+    logger.info(f"Processing {country_name}, year {year}")
+
+    # Step 1: Download Sentinel data
+    logger.info(f"Downloading Sentinel-2 data for {country_name}, year {year}")
+    download_sentinel_for_country_year(
+        config=config,
+        country_name=country_name,
+        year=year,
+        grid_gdf=grid_gdf,
+    )
+
+    # Step 2: Download VIIRS data
+    logger.info(f"Downloading VIIRS data for {country_name}, year {year}")
+    download_viirs_for_country_year(
+        config=config,
+        country_name=country_name,
+        year=year,
+        grid_gdf=grid_gdf,
+    )
+
+    # Step 3: Scan for missing data
+    logger.info(
+        f"Scanning for missing data in Sentinel files for {country_name}, year {year}"
+    )
+    scan_for_missing_data(data_type="sentinel", country_name=country_name, year=year)
+
+    logger.info(
+        f"Scanning for missing data in VIIRS files for {country_name}, year {year}"
+    )
+    scan_for_missing_data(data_type="viirs", country_name=country_name, year=year)
+
+    # Step 4: Repair failures for Sentinel data
+    logger.info(f"Repairing any failed Sentinel data for {country_name}, year {year}")
+    sentinel_repair_results = repair_country_year_failures(
+        data_type="sentinel",
+        country_name=country_name,
+        year=year,
+        grid_gdf=grid_gdf,
+        config=config,
+        max_repair_attempts=max_repair_attempts,
+    )
+
+    # Step 5: Repair failures for VIIRS data
+    logger.info(f"Repairing any failed VIIRS data for {country_name}, year {year}")
+    viirs_repair_results = repair_country_year_failures(
+        data_type="viirs",
+        country_name=country_name,
+        year=year,
+        grid_gdf=grid_gdf,
+        config=config,
+        max_repair_attempts=max_repair_attempts,
+    )
+
+    # Get any remaining failed cells
+    sentinel_failures = get_failed_cells("sentinel", country_name, year)
+    viirs_failures = get_failed_cells("viirs", country_name, year)
+
+    # If there are still failures after repair attempts, save them to a file and skip combination
+    if sentinel_failures or viirs_failures:
+        logger.warning(
+            f"Some cells could not be repaired for {country_name}, year {year}"
+        )
+        logger.warning(
+            f"Sentinel failures: {len(sentinel_failures)}, VIIRS failures: {len(viirs_failures)}"
+        )
+        save_problematic_cells(country_name, year, sentinel_failures, viirs_failures)
+        logger.warning(
+            f"Skipping data combination for {country_name}, year {year} due to unresolved failures"
+        )
+        return False
+
+    # Step 6: Combine Sentinel and VIIRS data
+    logger.info(f"Combining Sentinel and VIIRS data for {country_name}, year {year}")
+    combine_result = combine_sentinel_viirs_data(
+        countries=[country_name],
+        years=[year],
+        max_workers=12,
+        skip_existing=True,
+        delete_originals=False,  # Keep originals for now
+    )
+
+    # Step 7: Scan combined data
+    logger.info(f"Scanning combined data for {country_name}, year {year}")
+    combined_scan_result = scan_for_missing_data_combined(
+        max_workers=12, countries=[country_name], years=[year]
+    )
+
+    # Mark as processed
+    save_processed_pair(country_name, year)
+    logger.info(f"Marked {country_name}, year {year} as processed")
+
+    return True
 
 
 def main():
@@ -96,81 +254,9 @@ def main():
             )
             logger.info(f"Generated grid with {len(grid_gdf)} cells for {country_name}")
 
-            # Process each year for this country
+            # Process each year for this country - one at a time
             for year in years:
-                logger.info(
-                    f"Processing Sentinel-2 data for {country_name}, year {year}"
-                )
-                download_sentinel_for_country_year(
-                    config=config,
-                    country_name=country_name,
-                    year=year,
-                    grid_gdf=grid_gdf,
-                )
-                download_viirs_for_country_year(
-                    config=config,
-                    country_name=country_name,
-                    year=year,
-                    grid_gdf=grid_gdf,
-                )
-
-        for country in countries:
-            country_name = country["name"]
-            years = country.get("years", [])
-            for year in years:
-                if is_pair_processed(country_name, year):
-                    logger.info(
-                        f"Skipping already processed {country_name}, year {year}"
-                    )
-                    continue
-                # Scan for missing data in Sentinel files
-                logger.info(
-                    f"Scanning for missing data in Sentinel files for {country_name}, year {year}"
-                )
-                scan_for_missing_data(
-                    data_type="sentinel", country_name=country_name, year=year
-                )
-
-                # Scan for missing data in VIIRS files
-                logger.info(
-                    f"Scanning for missing data in VIIRS files for {country_name}, year {year}"
-                )
-                scan_for_missing_data(
-                    data_type="viirs", country_name=country_name, year=year
-                )
-
-                # Repair any failures for Sentinel data
-                logger.info(
-                    f"Repairing any failed Sentinel data for {country_name}, year {year}"
-                )
-                repair_country_year_failures(
-                    data_type="sentinel",
-                    country_name=country_name,
-                    year=year,
-                    grid_gdf=grid_gdf,
-                    config=config,
-                )
-
-                # Repair any failures for VIIRS data
-                logger.info(
-                    f"Repairing any failed VIIRS data for {country_name}, year {year}"
-                )
-                repair_country_year_failures(
-                    data_type="viirs",
-                    country_name=country_name,
-                    year=year,
-                    grid_gdf=grid_gdf,
-                    config=config,
-                )
-
-                save_processed_pair(country_name, year)
-                logger.info(f"Marked {country_name}, year {year} as processed")
-
-        logger.info("Combining data")
-        combine_sentinel_viirs_data()
-        logger.info("Scanning combined data")
-        result = scan_for_missing_data_combined(max_workers=8)
-        logger.info(f"Scan for missing data completed with result: {result}")
+                process_country_year_pair(config, country_name, year, grid_gdf, logger)
 
         logger.info("Pipeline execution completed successfully")
 

@@ -405,6 +405,10 @@ def download_viirs_for_country_year(
         year: Year to process
         grid_gdf: GeoDataFrame containing the grid cells
     """
+    monitor_stop_event = threading.Event()
+    recovery_stop_event = threading.Event()
+    monitoring_threads = []
+    recovery_threads = []
     # Get the output directory
     output_dir = get_results_dir() / "Images" / "VIIRS"
     cells_to_process = []
@@ -439,13 +443,19 @@ def download_viirs_for_country_year(
             daemon=True,
         )
         progress_thread.start()
-        monitor_thread = threading.Thread(target=monitor_request_rate, daemon=True)
+        monitor_thread = threading.Thread(
+            target=monitor_request_rate, args=(monitor_stop_event,), daemon=True
+        )
         monitor_thread.start()
+        monitoring_threads.append(monitor_thread)
 
         recovery_thread = threading.Thread(
-            target=monitor_and_recover_processing, daemon=True
+            target=monitor_and_recover_processing,
+            args=(recovery_stop_event,),
+            daemon=True,
         )
         recovery_thread.start()
+        recovery_threads.append(recovery_thread)
 
         # Initialize Earth Engine with appropriate endpoint
         initialize_earth_engine(config)
@@ -660,6 +670,8 @@ def download_viirs_for_country_year(
                 last_active_time = time.time()
         progress_thread_stop.set()
         progress_thread.join(timeout=5)
+        monitor_stop_event.set()
+        recovery_stop_event.set()
         value_tracker.log_statistics()
         save_value_statistics(output_dir, country_name, year)
 
@@ -667,6 +679,7 @@ def download_viirs_for_country_year(
         failure_summary = failure_logger.get_failure_summary()
         logger.info(f"Failure summary: {failure_summary}")
         logger.info(f"Completed processing for {country_name}, year {year}")
+        return
 
     except Exception as e:
         error_msg = f"Critical error in download_viirs_for_country_year: {str(e)}"
@@ -676,6 +689,8 @@ def download_viirs_for_country_year(
         failure_logger.log_failure(
             "global", "critical_error", str(e), {"country": country_name, "year": year}
         )
+        monitor_stop_event.set()
+        recovery_stop_event.set()
         if "progress_thread_stop" in locals():
             progress_thread_stop.set()
             if "progress_thread" in locals():
@@ -1665,13 +1680,13 @@ def setup_request_counting():
     logger.info("Set up request counting for Earth Engine methods")
 
 
-def monitor_request_rate():
+def monitor_request_rate(stop_event):
     """Monitor the actual request rate to Earth Engine with moving average."""
-    last_count = 0
-    last_time = time.time()
-    rate_history = []
+    while not stop_event.is_set():
+        last_count = 0
+        last_time = time.time()
+        rate_history = []
 
-    while True:
         try:
             current_count = sum(request_counter.counts.values())
             current_time = time.time()
@@ -1705,7 +1720,7 @@ def monitor_request_rate():
         time.sleep(15)
 
 
-def monitor_and_recover_processing():
+def monitor_and_recover_processing(stop_event):
     """
     Enhanced monitoring function with complete restart capability when stalled.
     """
@@ -1717,7 +1732,7 @@ def monitor_and_recover_processing():
     # Keep track of when workers were last restarted
     last_worker_restart = time.time()
 
-    while True:
+    while not stop_event.is_set():
         try:
             current_count = sum(request_counter.counts.values())
             current_time = time.time()

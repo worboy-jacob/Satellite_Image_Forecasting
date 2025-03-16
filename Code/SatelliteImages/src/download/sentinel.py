@@ -264,6 +264,10 @@ def download_sentinel_for_country_year(
     """
     # Filter out cells that have already been processed
     # Get the output directory
+    monitor_stop_event = threading.Event()
+    recovery_stop_event = threading.Event()
+    monitoring_threads = []
+    recovery_threads = []
     output_dir = get_results_dir() / "Images" / "Sentinel"
     cells_to_process = []
     for idx, cell in grid_gdf.iterrows():
@@ -299,13 +303,19 @@ def download_sentinel_for_country_year(
             daemon=True,
         )
         progress_thread.start()
-        monitor_thread = threading.Thread(target=monitor_request_rate, daemon=True)
+        monitor_thread = threading.Thread(
+            target=monitor_request_rate, args=(monitor_stop_event,), daemon=True
+        )
         monitor_thread.start()
+        monitoring_threads.append(monitor_thread)
 
         recovery_thread = threading.Thread(
-            target=monitor_and_recover_processing, daemon=True
+            target=monitor_and_recover_processing,
+            args=(recovery_stop_event,),
+            daemon=True,
         )
         recovery_thread.start()
+        recovery_threads.append(recovery_thread)
 
         # Initialize Earth Engine with appropriate endpoint
         initialize_earth_engine(config)
@@ -330,6 +340,8 @@ def download_sentinel_for_country_year(
             error_msg = f"No CRS defined for country {country_name}"
             logger.error(error_msg)
             failure_logger.log_failure("global", "config_error", error_msg)
+            monitor_stop_event.set()
+            recovery_stop_event.set()
             return
 
         grid_gdf = grid_gdf.to_crs(country_crs)
@@ -538,11 +550,13 @@ def download_sentinel_for_country_year(
                 last_active_time = time.time()
         progress_thread_stop.set()
         progress_thread.join(timeout=5)
+        monitor_stop_event.set()
+        recovery_stop_event.set()
         # Log failure summary at the end
         failure_summary = failure_logger.get_failure_summary()
         logger.info(f"Failure summary: {failure_summary}")
         logger.info(f"Completed processing for {country_name}, year {year}")
-
+        return  # Explicit return to exit function
     except Exception as e:
         error_msg = f"Critical error in download_sentinel_for_country_year: {str(e)}"
         logger.error(error_msg)
@@ -551,6 +565,8 @@ def download_sentinel_for_country_year(
         failure_logger.log_failure(
             "global", "critical_error", str(e), {"country": country_name, "year": year}
         )
+        monitor_stop_event.set()
+        recovery_stop_event.set()
         if "progress_thread_stop" in locals():
             progress_thread_stop.set()
             if "progress_thread" in locals():
@@ -2252,13 +2268,13 @@ def setup_request_counting():
     logger.info("Set up request counting for Earth Engine methods")
 
 
-def monitor_request_rate():
+def monitor_request_rate(stop_event):
     """Monitor the actual request rate to Earth Engine with moving average."""
     last_count = 0
     last_time = time.time()
     rate_history = []
 
-    while True:
+    while not stop_event.is_set():
         try:
             current_count = sum(request_counter.counts.values())
             current_time = time.time()
@@ -2292,7 +2308,7 @@ def monitor_request_rate():
         time.sleep(15)
 
 
-def monitor_and_recover_processing():
+def monitor_and_recover_processing(stop_event):
     """
     Enhanced monitoring function with complete restart capability when stalled.
     """
@@ -2304,7 +2320,7 @@ def monitor_and_recover_processing():
     # Keep track of when workers were last restarted
     last_worker_restart = time.time()
 
-    while True:
+    while not stop_event.is_set():
         try:
             current_count = sum(request_counter.counts.values())
             current_time = time.time()
