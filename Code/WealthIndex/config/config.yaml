@@ -1,7 +1,6 @@
 # Output configuration
 output_file: "wealth_index"
 log_level: "INFO" 
-###TODO: Add comments here for all data
 
 # Data sources configuration
 country_year:
