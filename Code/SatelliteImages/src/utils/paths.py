@@ -11,6 +11,7 @@ def get_base_dir() -> Path:
 
 
 def get_SatelliteImage_dir() -> Path:
+    """Return Satellite Image Directory"""
     return get_base_dir() / "Code" / "SatelliteImages"
 
 
@@ -67,4 +68,5 @@ def find_shapefile(country_name: str) -> Path:
 
 
 def get_processed_pairs_file() -> Path:
+    """Return the json with the already processed pairs."""
     return get_results_dir() / "processed_country_year_pairs.json"

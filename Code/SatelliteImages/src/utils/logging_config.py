@@ -31,7 +31,7 @@ def setup_logging(log_level: str = "INFO") -> logging.Logger:
     # Set up rotating file handler
     log_path = get_logs_dir()
     log_path.mkdir(parents=True, exist_ok=True)
-    # 5 MB per file, keep 3 backup files
+    # 100 MB per file, keep 3 backup files. Higher than other logs due to how large these are
     file_handler = RotatingFileHandler(
         log_path / "image_processing.log",
         maxBytes=100 * 1024 * 1024,  # 100 MB

@@ -1,0 +1,11 @@
+esda
+geopandas
+libpysal
+matplotlib
+numpy
+pandas
+PyYAML
+scipy
+setuptools
+Shapely
+tqdm

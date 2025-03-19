@@ -1,10 +1,18 @@
+"""
+Multiple Imputation by Chained Equations (MICE) implementation.
+
+Provides an implementation of the MICE algorithm for handling missing data
+through an iterative series of predictive models. Each variable with missing
+values is modeled as a function of other variables, with appropriate models
+selected based on variable types (linear regression for numeric variables,
+logistic regression for categorical variables).
+"""
+
 from src.data_processing.imputation.base_imputer import BaseImputer
 from sklearn.linear_model import LinearRegression, LogisticRegression, BayesianRidge
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, Union, Tuple, List
-from joblib import Parallel, delayed
-from tqdm import tqdm
 import gc
 from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from sklearn.exceptions import ConvergenceWarning
@@ -19,17 +27,39 @@ for handler in logger.handlers:
 
 
 class MICEImputer(BaseImputer):
-    """Multiple Imputation by Chained Equations implementation."""
+    """
+    Multiple Imputation by Chained Equations implementation.
+
+    Implements the MICE algorithm which handles missing data by modeling
+    each variable with missing values conditionally on other variables in
+    the data, creating multiple imputations to account for the statistical
+    uncertainty in the imputations.
+    """
 
     def _generate_parameter_combinations(
         self, n_samples: int, column_type: str, missing_pct: float, column_name: str
     ) -> List[Dict]:
-        """Generate parameter combinations for MICE imputation."""
+        """
+        Generate parameter combinations for MICE imputation.
+
+        Creates appropriate parameter sets based on data characteristics
+        such as sample size, column type, and missing percentage, focusing
+        on likely optimal configurations.
+
+        Args:
+            n_samples: Number of samples in the dataset
+            column_type: Type of the column ('numeric' or 'categorical')
+            missing_pct: Percentage of missing values
+            column_name: Name of the column for logging
+
+        Returns:
+            List of parameter dictionaries for evaluation
+        """
         logger.info(
             f"Generating parameters for {column_name} ({column_type}, {missing_pct:.4f}% missing)"
         )
 
-        # Determine n_impute values based on missing percentage and sample size
+        # Adjust imputation count based on missing data severity
         if missing_pct < 10:
             n_impute_values = [3, 5]
         elif missing_pct < 30:
@@ -113,13 +143,26 @@ class MICEImputer(BaseImputer):
 
     def _calculate_secondary_score(self, df, target_column, params, imputer):
         """
-        Calculate secondary score for tie-breaking.
-        Returns a score between 0 and 1 (lower is better).
+        Calculate secondary score for tie-breaking between parameter sets.
+
+        Evaluates parameter configurations based on model confidence and
+        complexity when multiple configurations have similar imputation quality.
+        Lower scores are better, with values between 0 and 1.
+
+        Args:
+            df: DataFrame containing the data
+            target_column: Column being imputed
+            params: Parameter configuration to evaluate
+            imputer: The initialized imputation model
+
+        Returns:
+            Float score between 0 and 1 (lower is better)
         """
         # 1. Calculate prediction confidence
         confidence_score = 0.5  # Default neutral score
         non_missing_mask = ~df[target_column].isna()
 
+        # Evaluate prediction confidence on observed data
         if non_missing_mask.sum() > 0:
             try:
                 X_observed = self._prepare_prediction_features(
@@ -187,7 +230,20 @@ class MICEImputer(BaseImputer):
     def _get_imputer(
         self, series: pd.Series, params: Dict[str, Any]
     ) -> Union[LinearRegression, LogisticRegression, BayesianRidge]:
-        """Get the appropriate sklearn imputer based on data type and method."""
+        """
+        Get the appropriate sklearn imputer based on data type and method.
+
+        Selects and configures the proper scikit-learn model based on whether
+        the column is numeric or categorical and the specified method.
+
+        Args:
+            series: The series to be imputed
+            params: Parameters specifying the imputation method
+
+        Returns:
+            Configured scikit-learn model ready for fitting
+        """
+
         method = params["method"]
         is_numeric = self.determine_column_type(series) == "numeric"
 
@@ -212,7 +268,22 @@ class MICEImputer(BaseImputer):
         y: np.ndarray,
         max_attempts: int = 3,
     ) -> LogisticRegression:
-        """Safely fit logistic regression with multiple attempts and parameter adjustment."""
+        """
+        Safely fit logistic regression with multiple attempts and parameter adjustment.
+
+        Handles convergence issues by automatically adjusting parameters and
+        making multiple fitting attempts, increasing max_iter and relaxing
+        tolerance if needed.
+
+        Args:
+            imputer: LogisticRegression model to fit
+            X: Feature matrix
+            y: Target values
+            max_attempts: Maximum number of fitting attempts
+
+        Returns:
+            Fitted LogisticRegression model
+        """
         original_max_iter = imputer.max_iter
 
         for attempt in range(max_attempts):
@@ -251,7 +322,22 @@ class MICEImputer(BaseImputer):
         params: Dict[str, Any],
         country_year: str,
     ) -> pd.Series:
-        """Perform MICE imputation for a single column."""
+        """
+        Perform MICE imputation for a single column.
+
+        Implements the core MICE algorithm for one column, creating multiple
+        imputations through an iterative process and combining them into a
+        final imputation.
+
+        Args:
+            df: DataFrame containing the data
+            target_column: Column to impute
+            params: Parameters for the imputation process
+            country_year: Country-year identifier for logging
+
+        Returns:
+            Series with imputed values
+        """
         start_time = time()
 
         # Initialize encoders
@@ -308,7 +394,7 @@ class MICEImputer(BaseImputer):
         if not is_numeric_target:
             label_encoder.fit(df[target_column].dropna())
 
-        # Multiple imputation loop
+        # Multiple imputation loop - create n_impute different imputed datasets
         for m in range(params["n_impute"]):
             current_imp = df[target_column].copy()
 
@@ -319,7 +405,7 @@ class MICEImputer(BaseImputer):
             else:
                 current_imp[missing_mask] = current_imp.mode().iloc[0]
 
-            # Iteration loop
+            # Iteration loop - refine each imputation through multiple iterations
             for iteration in range(params["n_iter"]):
                 previous_imp = current_imp.copy()
 
@@ -368,7 +454,9 @@ class MICEImputer(BaseImputer):
             imputations[:, m] = current_imp
             gc.collect()
 
-        # Combine imputations
+        # Combine multiple imputations into final values
+        # For numeric data: use mean of imputations
+        # For categorical data: use mode (most common value)
         final_imputation = df[target_column].copy()
         if is_numeric_target:
             final_values = np.mean(imputations[missing_mask], axis=1)
@@ -391,7 +479,22 @@ class MICEImputer(BaseImputer):
         return final_imputation
 
     def impute(self, df: pd.DataFrame, country_year: str) -> Tuple[pd.DataFrame, float]:
-        """Perform MICE imputation on the entire dataset."""
+        """
+        Perform MICE imputation on the entire dataset.
+
+        Orchestrates the complete MICE imputation workflow for all columns
+        with missing values, handling special cases and delegating to the
+        common imputation workflow.
+
+        Args:
+            df: DataFrame with missing values to impute
+            country_year: String identifier for the country and year
+
+        Returns:
+            Tuple containing:
+            - DataFrame with imputed values
+            - Overall imputation quality score
+        """
         logger.info(f"Imputing missing values using MICE for {country_year}")
         for col in df.columns:
             unique_values = df[col].dropna().unique()

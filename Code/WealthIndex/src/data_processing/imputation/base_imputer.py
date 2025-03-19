@@ -1,4 +1,12 @@
-# base_imputer.py
+"""
+Base implementation for data imputation methods.
+
+Provides a flexible framework for imputing missing values in survey data
+with configurable optimization strategies, parallel processing, and
+performance tracking. Supports multiple imputation methods through a common
+workflow architecture.
+"""
+
 import pandas as pd
 import numpy as np
 import logging
@@ -31,17 +39,27 @@ def setup_logging(level_str: str) -> int:
     return level
 
 
-###Add country names here and maybe other places?
 class PerformanceTracker:
-    """Tracks performance metrics for imputation processes."""
+    """
+    Tracks performance metrics for imputation processes.
+
+    Records timing information, convergence statistics, and other metrics
+    to evaluate imputation performance across different columns.
+    """
 
     def __init__(self):
+        """Initialize performance tracking with empty statistics containers."""
         self.timings = {}
         self.column_stats = {}
         self.total_start_time = time()
 
     def start_column(self, column: str):
-        """Record the start time for processing a column."""
+        """
+        Record the start time for processing a column.
+
+        Args:
+            column: Name of the column being processed
+        """
         if column not in self.timings:
             self.timings[column] = {}
         self.timings[column]["start"] = time()
@@ -53,13 +71,24 @@ class PerformanceTracker:
             }
 
     def update_column(self, column: str, stats: Dict[str, Any]):
-        """Update column statistics with a dictionary of values."""
+        """
+        Update column statistics with additional metrics.
+
+        Args:
+            column: Name of the column being processed
+            stats: Dictionary of statistics to update or add
+        """
         if column not in self.column_stats:
             self.column_stats[column] = {}
         self.column_stats[column].update(stats)
 
     def finish_column(self, column: str):
-        """Record the end time and calculate duration for a column."""
+        """
+        Record the end time and calculate processing duration for a column.
+
+        Args:
+            column: Name of the column being processed
+        """
         if column in self.timings:
             end_time = time()
             self.timings[column]["end"] = end_time
@@ -68,7 +97,12 @@ class PerformanceTracker:
             )
 
     def get_summary(self) -> Dict:
-        """Get summary statistics with safe duration calculation."""
+        """
+        Get summary statistics for all processed columns.
+
+        Returns:
+            Dictionary containing timing and performance metrics
+        """
         total_time = time() - self.total_start_time
 
         # Safely calculate average duration
@@ -88,7 +122,13 @@ class PerformanceTracker:
 
 
 class BaseImputer:
-    """Base class for all imputation methods with common functionality."""
+    """
+    Base class for all imputation methods with common functionality.
+
+    Provides core methods for data preparation, parameter optimization,
+    and imputation workflows that are shared across different imputation
+    implementations.
+    """
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
@@ -101,8 +141,17 @@ class BaseImputer:
 
     def determine_column_type(self, series: pd.Series) -> str:
         """
-        Definitively determine if a column should be numeric or categorical.
-        Returns 'numeric' only if all values can be converted to numbers.
+        Determine if a column should be treated as numeric or categorical.
+
+        Makes a definitive determination by attempting numeric conversion
+        on non-null values and checking for conversion failures.
+
+        Args:
+            series: The pandas Series to analyze
+
+        Returns:
+            'numeric' if all non-null values can be converted to numbers,
+            'categorical' otherwise
         """
         series_test = series.copy()
 
@@ -121,6 +170,17 @@ class BaseImputer:
     ) -> Tuple[pd.DataFrame, Dict[str, str]]:
         """
         Preprocess dataframe to optimize datatypes for imputation.
+
+        Converts columns to appropriate types while preserving NaN values,
+        tracking the original and converted types for later restoration.
+
+        Args:
+            df: Input DataFrame to preprocess
+
+        Returns:
+            Tuple containing:
+            - DataFrame with optimized data types
+            - Dictionary mapping column names to their type ('numeric' or 'category')
         """
         df_processed = df.copy()
         column_types = {}
@@ -150,7 +210,20 @@ class BaseImputer:
         return df_processed, column_types
 
     def _prepare_data(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Prepare data for imputation by handling IDs and converting types."""
+        """
+        Prepare data for imputation by separating IDs and converting types.
+
+        Extracts ID columns, handles "nan" strings, and converts columns to
+        appropriate types for imputation processing.
+
+        Args:
+            df: Input DataFrame with potential missing values
+
+        Returns:
+            Tuple containing:
+            - DataFrame with data ready for imputation
+            - DataFrame with extracted ID columns
+        """
         df_imputed = df.copy()
 
         # Check if ID columns exist in the dataframe
@@ -185,6 +258,17 @@ class BaseImputer:
     ) -> Dict[str, pd.Series]:
         """
         Create validation masks for parameter optimization.
+
+        Randomly selects a portion of non-missing values in each column to use
+        for validating imputation quality during parameter optimization.
+
+        Args:
+            df: Input DataFrame
+            columns: List of column names to create masks for
+
+        Returns:
+            Dictionary mapping column names to boolean Series where True indicates
+            values to use for validation
         """
         masks = {}
         for column in columns:
@@ -206,7 +290,19 @@ class BaseImputer:
     def _prepare_prediction_features(
         self, df: pd.DataFrame, target_column: str
     ) -> np.ndarray:
-        """Prepare feature matrix for prediction probability calculation."""
+        """
+        Prepare feature matrix for prediction models.
+
+        Converts and encodes predictor columns appropriately for use in
+        imputation models, handling both numeric and categorical features.
+
+        Args:
+            df: DataFrame containing the data
+            target_column: Name of the column to be predicted
+
+        Returns:
+            numpy.ndarray containing the prepared feature matrix
+        """
         df_to_encode = df.copy()
         predictor_columns = [
             col for col in df_to_encode.columns if col != target_column
@@ -268,6 +364,17 @@ class BaseImputer:
     ) -> pd.DataFrame:
         """
         Restore original column types after imputation.
+
+        Converts imputed data back to original datatypes to maintain
+        consistency with the input data.
+
+        Args:
+            df: DataFrame with imputed values
+            original_dtypes: Dictionary mapping column names to original datatypes
+            numerical_columns: List of columns that should be numeric
+
+        Returns:
+            DataFrame with restored column types
         """
         df_restored = df.copy()
 
@@ -291,8 +398,21 @@ class BaseImputer:
         impute_func: Callable,
     ) -> float:
         """
-        Validate parameters for a single column using artificially created missing values.
-        Returns normalized error between 0 and 1 for both categorical and numeric columns.
+        Validate imputation parameters using artificial missing values.
+
+        Tests imputation quality by artificially removing known values,
+        imputing them, and measuring the error between imputed and actual values.
+
+        Args:
+            df: DataFrame containing the data
+            target_column: Column to validate
+            params: Parameter configuration to test
+            validation_mask: Boolean mask indicating values to use for validation
+            country_year: Country-year identifier for logging
+            impute_func: Function to perform imputation
+
+        Returns:
+            Normalized error score (0-1 scale) where lower is better
         """
         df_validation = df.copy()
         df_validation.loc[validation_mask, target_column] = np.nan
@@ -331,6 +451,17 @@ class BaseImputer:
     ) -> pd.Series:
         """
         Safely fill values while respecting the original dtype.
+
+        Handles type conversion and compatibility issues when filling
+        missing values in different types of Series.
+
+        Args:
+            series: Series to fill values in
+            values: Array of values to use for filling
+            missing_mask: Boolean mask indicating positions to fill
+
+        Returns:
+            Series with filled values and preserved dtype where possible
         """
         result = series.copy()
 
@@ -351,6 +482,16 @@ class BaseImputer:
     def _safe_fill_numeric(self, series: pd.Series, fill_value: float) -> pd.Series:
         """
         Safely fill numeric series while preserving dtype compatibility.
+
+        Handles special cases like integer types that can't represent NaN
+        and string types that need conversion.
+
+        Args:
+            series: Series to fill values in
+            fill_value: Value to use for filling
+
+        Returns:
+            Series with filled values and preserved dtype where possible
         """
         # If the series is string type, handle differently
         if pd.api.types.is_string_dtype(series.dtype):
@@ -389,8 +530,22 @@ class BaseImputer:
     ) -> Tuple[bool, float]:
         """
         Check convergence of iterative imputation.
-        For numeric values: normalized difference metric
-        For categorical values: proportion of values that changed
+
+        For numeric values: calculates normalized difference metric
+        For categorical values: calculates proportion of values that changed
+
+        Args:
+            current_imp: Current imputed values
+            previous_imp: Previous iteration's imputed values
+            missing_mask: Mask indicating missing values
+            iteration: Current iteration number
+            min_iterations: Minimum iterations before checking convergence
+            convergence_threshold: Threshold for determining convergence
+
+        Returns:
+            Tuple containing:
+            - Boolean indicating whether convergence has been reached
+            - Float convergence metric value
         """
         if iteration < min_iterations:
             return False, float("inf")
@@ -424,14 +579,17 @@ class BaseImputer:
         self, column_scores: Dict[str, float], missing_values: pd.Series
     ) -> float:
         """
-        Calculate weighted imputation score based on number of missing values per column.
+        Calculate weighted imputation score based on missing value counts.
+
+        Weights each column's score by the proportion of total missing values
+        it represents, giving more importance to columns with more missing data.
 
         Args:
             column_scores: Dictionary mapping column names to their imputation scores
             missing_values: Series containing count of missing values per column
 
         Returns:
-            Weighted score across all columns
+            Weighted average score across all columns
         """
         score_series = pd.Series(column_scores)
         total_missing = missing_values.sum()
@@ -462,16 +620,20 @@ class BaseImputer:
         """
         Process multiple columns using their optimal parameters in parallel.
 
+        Applies the imputation function to each column with missing values
+        using the optimal parameters determined during optimization.
+
         Args:
             df: DataFrame to impute
             columns_with_na: List of columns with missing values
             optimal_params: Dictionary mapping columns to their optimal parameters
             original_dtypes: Dictionary of original column data types
             validation_masks: Dictionary of validation masks for each column
-            impute_column_func: Function to impute a single column
+            imputer_func: Function to impute a single column
+            country_year: Country-year identifier for logging
 
         Returns:
-            DataFrame with imputed values
+            DataFrame with imputed values for all columns
         """
         from joblib import Parallel, delayed
 
@@ -502,8 +664,10 @@ class BaseImputer:
 
     def _initial_fill_missing(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Initially fill missing values for all columns to prepare for imputation.
-        Numeric columns are filled with mean, categorical with mode.
+        Initially fill missing values to prepare for iterative imputation.
+
+        Fills numeric columns with mean values and categorical columns with
+        mode values to provide a starting point for more sophisticated imputation.
 
         Args:
             df: DataFrame with missing values
@@ -545,7 +709,9 @@ class BaseImputer:
     ) -> pd.Series:
         """
         Process a single column for imputation.
-        This is a template method that should be overridden or used with an impute_func.
+
+        Template method that handles performance tracking and logging while
+        delegating the actual imputation to the provided function.
 
         Args:
             df: DataFrame containing the column to impute
@@ -555,6 +721,7 @@ class BaseImputer:
             optimal_params: Optimal parameters for imputation
             pbar: Progress bar object
             impute_func: Function to perform the imputation
+            country_year: Country-year identifier for logging
 
         Returns:
             Series with imputed values
@@ -600,7 +767,21 @@ class BaseImputer:
         validation_masks: Dict[str, pd.Series],
         generate_params: Callable,
     ) -> List[Tuple[str, Dict[str, Any]]]:
-        """Generate all column and parameter combinations upfront."""
+        """
+        Generate all column and parameter combinations for testing.
+
+        Creates a list of all possible combinations of columns with missing values
+        and parameter configurations to evaluate during optimization.
+
+        Args:
+            df: DataFrame containing the data
+            columns_with_na: List of columns with missing values
+            validation_masks: Dictionary of validation masks
+            generate_params: Function to generate parameter combinations
+
+        Returns:
+            List of tuples containing (column_name, parameter_dict)
+        """
         all_combinations = []
 
         for column in columns_with_na:
@@ -627,7 +808,28 @@ class BaseImputer:
         calc_secondary_scores: Callable,
         get_imputer: Callable,
     ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, float]]:
-        """Find optimal parameters for all columns using parallel processing."""
+        """
+        Find optimal parameters for all columns using parallel processing.
+
+        Tests multiple parameter combinations for each column and selects
+        the best configuration based on imputation quality metrics, using
+        secondary scoring to break ties.
+
+        Args:
+            df: DataFrame containing the data
+            columns_with_na: List of columns with missing values
+            validation_masks: Dictionary of validation masks
+            country_year: Country-year identifier for logging
+            impute_single_column: Function to impute a single column
+            generate_params: Function to generate parameter combinations
+            calc_secondary_scores: Function to calculate secondary scores
+            get_imputer: Function to get an imputer object
+
+        Returns:
+            Tuple containing:
+            - Dictionary mapping columns to their optimal parameters
+            - Dictionary mapping columns to their best scores
+        """
         # Generate all combinations
         all_combinations = self._generate_all_column_parameter_combinations(
             df, columns_with_na, validation_masks, generate_params
@@ -718,7 +920,24 @@ class BaseImputer:
         impute_single_column: Callable,
         pbar: tqdm,
     ) -> Tuple[str, Dict[str, Any], float]:
-        """Validate a single column-parameter combination."""
+        """
+        Validate a single column-parameter combination.
+
+        Tests how well a specific parameter configuration imputes a column
+        by comparing imputed values to known values in the validation set.
+
+        Args:
+            df: DataFrame containing the data
+            column: Name of the column to validate
+            params: Parameter configuration to test
+            validation_mask: Mask for validation data
+            country_year: Country-year identifier for logging
+            impute_single_column: Function to perform imputation
+            pbar: Progress bar to update
+
+        Returns:
+            Tuple containing (column_name, parameter_dict, score)
+        """
         score = self._validate_parameters(
             df,
             column,
@@ -739,7 +958,23 @@ class BaseImputer:
         calc_secondary_scores: Callable,
         pbar: tqdm,
     ) -> Tuple[float, Dict[str, Any]]:
-        """Calculate secondary score for a single parameter set."""
+        """
+        Calculate secondary score for a parameter configuration.
+
+        Used to break ties when multiple configurations have the same primary score,
+        based on criteria like model complexity or stability.
+
+        Args:
+            df: DataFrame containing the data
+            column: Name of the column
+            params: Parameter configuration
+            get_imputer: Function to get an imputer object
+            calc_secondary_scores: Function to calculate secondary scores
+            pbar: Progress bar to update
+
+        Returns:
+            Tuple containing (secondary_score, parameter_dict)
+        """
         imputer = get_imputer(df[column], params)
         secondary_score = calc_secondary_scores(df, column, params, imputer)
         pbar.update(1)
@@ -758,14 +993,22 @@ class BaseImputer:
         """
         Common imputation workflow used by all imputation methods.
 
+        Orchestrates the entire imputation process from data preparation through
+        parameter optimization to final imputation and evaluation.
+
         Args:
             df: DataFrame to impute
             imputation_name: Name of the imputation method for logging
-            find_optimal_params_func: Function to find optimal parameters
-            impute_column_func: Function to impute a single column
+            generate_params: Function to generate parameter combinations
+            impute_single_column: Function to impute a single column
+            calc_secondary_scores: Function to calculate secondary scores
+            country_year: Country-year identifier for logging
+            get_imputer: Function to get an imputer object
 
         Returns:
-            Tuple of (imputed_dataframe, imputation_score)
+            Tuple containing:
+            - DataFrame with imputed values
+            - Overall imputation quality score
         """
         self.tracker.start_column("total")
         for col in df.columns:

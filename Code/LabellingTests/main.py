@@ -4,22 +4,27 @@ import sys
 import yaml
 import numpy as np
 import pandas as pd
-from label import (
+from src.core.label import (
     load_grid_cells,
     load_wealth_data,
     calculate_coverage,
     analyze_thresholds,
     plot_results,
 )
-from logging_config import setup_logging
-from paths import get_config_dir, get_grid_path, get_wealthindex_paths, get_output_dir
+from src.utils.logging_config import setup_logging
+from src.utils.paths import (
+    get_config_dir,
+    get_grid_path,
+    get_wealthindex_paths,
+    get_output_dir,
+)
 from pathlib import Path
 import matplotlib.pyplot as plt
 
 
 def analyze_by_year(grid_gdf_year, min_threshold, max_threshold, year, steps=20):
     """Analyze thresholds for a single year's data."""
-    from label import analyze_thresholds
+    from src.core.label import analyze_thresholds
 
     results_df = analyze_thresholds(grid_gdf_year, min_threshold, max_threshold, steps)
     # Add year column to results
@@ -107,7 +112,7 @@ def aggregate_results(year_results_dfs):
 
 
 def main():
-    """Run the analysis using configuration from config.yaml."""
+    """Label cells with different thresholds and analyzing them with confidence, percent labeled, and spatial autocorrelation."""
     logger = setup_logging("INFO")
     logger.info("Starting wealth coverage threshold analysis for multiple years...")
     config_path = get_config_dir() / "config.yaml"
@@ -123,9 +128,7 @@ def main():
 
     # Extract configuration values
     grid_gpkg_path = get_grid_path()
-    wealth_gpkg_paths = (
-        get_wealthindex_paths()
-    )  # This should now return a list of paths
+    wealth_gpkg_paths = get_wealthindex_paths()
     output_dir = get_output_dir()
     min_threshold = config.get("min_threshold", 20)
     max_threshold = config.get("max_threshold", 40)
@@ -151,7 +154,7 @@ def main():
             logger.error(f"Error creating output directory: {e}")
             sys.exit(1)
 
-    # Load grid cells (only once)
+    # Load grid cells
     try:
         logger.info("Loading grid cells...")
         grid_gdf = load_grid_cells(grid_gpkg_path)
@@ -227,7 +230,7 @@ def main():
             logger.error(f"Error saving aggregated results: {e}")
             sys.exit(1)
 
-    # Create a custom plotting function for aggregated results with error bars
+    # Create a plotting function for aggregated results with error bars
     def plot_aggregated_results(agg_results, output_path=None):
         fig, axs = plt.subplots(3, 1, figsize=(10, 15))
 

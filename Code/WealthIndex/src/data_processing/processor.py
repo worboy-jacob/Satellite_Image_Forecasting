@@ -1,3 +1,12 @@
+"""
+Data preprocessing module for DHS survey data.
+
+Provides functionality for loading, cleaning, and standardizing household survey
+data from Demographic and Health Surveys (DHS) across multiple countries and years.
+Handles data type determination, missing value replacement, and special value mappings
+to ensure consistency across datasets.
+"""
+
 from pathlib import Path
 import pandas as pd
 import logging
@@ -8,18 +17,24 @@ logger = logging.getLogger("wealth_index.processor")
 
 
 class DataProcessor:
-    """Handles data loading and preprocessing."""
+    """
+    Handles data loading and preprocessing for household survey data.
+
+    Provides methods for loading DHS survey data files, applying consistent
+    data transformations, handling missing values, and ensuring comparability
+    across different countries and survey years.
+    """
 
     def __init__(self, config: dict):
         """
-        Initialize DataProcessor with configuration.
+        Initialize DataProcessor with configuration settings.
 
         Args:
-            config (dict): Configuration dictionary containing:
-                - country_year: Dict of countries and their years
-                - columns_to_include: List of columns to include
-                - missing_threshold: Float threshold for missing data (0-1)
-                - replace_val: Dict of value replacements
+            config: Configuration dictionary containing:
+                - country_year: Dict mapping countries to their survey years
+                - columns_to_include: List of column names to retain
+                - missing_threshold: Maximum allowable proportion of missing values (0-1)
+                - replace_val: Dict mapping values to be replaced
         """
         self.config = config
         self.missing_threshold = config.get("missing_threshold", 0.5)
@@ -27,7 +42,13 @@ class DataProcessor:
         self._init_special_mappings()
 
     def _init_special_mappings(self) -> None:
-        """Initialize special mappings for specific columns."""
+        """
+        Initialize special mappings for specific categorical columns.
+
+        Creates standardized value mappings for columns with coded values
+        that need to be translated to meaningful categories (e.g., roof and
+        wall materials).
+        """
         self.special_mappings = {
             "hv215": {
                 "10": "natural",
@@ -75,15 +96,17 @@ class DataProcessor:
 
     def _apply_special_mapping(self, series: pd.Series, column_name: str) -> pd.Series:
         """
-        Apply special mapping to a specific column.
-        If value isn't in mapping, keeps original value.
+        Apply column-specific value mapping to standardize categorical values.
+
+        Transforms coded values into standardized category names based on predefined
+        mappings while preserving values not found in the mapping dictionary.
 
         Args:
-            series: Input series to map
+            series: Input series to transform
             column_name: Name of column being processed
 
         Returns:
-            Mapped series with string dtype
+            Series with mapped values and string dtype
         """
         if column_name not in self.special_mappings:
             return series
@@ -93,7 +116,7 @@ class DataProcessor:
         temp_series = series.astype(str)
         result = pd.Series(index=series.index, dtype="string")
 
-        # Create mask for values in mapping
+        # Create mask for values that exist in the mapping dictionary
         mappable_mask = temp_series.isin(mapping.keys())
 
         # Apply mapping where possible
@@ -108,7 +131,13 @@ class DataProcessor:
         return result
 
     def _init_replacement_dict(self) -> None:
-        """Initialize the replacement dictionary with all possible variations."""
+        """
+        Initialize the value replacement dictionary with case variations.
+
+        Creates a comprehensive replacement dictionary that includes multiple
+        case variations (upper, lower, original) for each replacement value
+        to ensure consistent handling regardless of input format.
+        """
         base_replacements = self.config.get(
             "replace_val",
             {
@@ -132,27 +161,33 @@ class DataProcessor:
 
     def determine_column_type(self, series: pd.Series) -> str:
         """
-        Definitively determine if a column should be numeric or categorical.
+        Determine whether a column should be treated as numeric or categorical.
+
+        Makes a definitive determination based on content analysis, checking
+        if values can be converted to numbers without data loss and whether
+        the numeric representation adds information value.
+
+        Args:
+            series: Column data to analyze
 
         Returns:
-            str: 'numeric' or 'categorical'
+            'numeric' or 'categorical' based on content analysis
         """
-        # First check if already numeric
+        # Check if already numeric - simplest case
         if pd.api.types.is_numeric_dtype(series):
             return "numeric"
 
-        # If not numeric, check if can be converted to numeric without data loss
+        # For non-numeric types, try conversion and analyze results
         non_null_values = series.dropna()
 
         try:
             numeric_converted = pd.to_numeric(non_null_values, errors="coerce")
-            # Check if conversion lost any data
+            # Check if all values convert successfully to numbers
             if numeric_converted.notna().sum() == len(non_null_values):
-                # All values successfully converted to numeric
-                # Additional check: if all values are integers
+                # For integer-like data, treat as numeric
                 if np.all(numeric_converted.astype(float).mod(1) == 0):
                     return "numeric"
-                # If has decimals, check if they're meaningful
+                # For decimal data, check if numeric form adds information
                 elif (
                     numeric_converted.nunique()
                     > non_null_values.astype(str).nunique() * 0.5
@@ -164,8 +199,14 @@ class DataProcessor:
 
     def load_all_data(self) -> dict:
         """
-        Load and process all data files based on configuration.
-        Returns dict of processed DataFrames.
+        Load and process all data files specified in configuration.
+
+        Finds and processes all DHS data files for the specified countries
+        and years, then harmonizes them by retaining only columns that are
+        present and valid across all datasets.
+
+        Returns:
+            Dictionary mapping country_year keys to processed DataFrames
         """
         dfs = {}
         from src.utils.paths import get_project_root
@@ -197,7 +238,18 @@ class DataProcessor:
 
     def load_data(self, file_path: Path, year: int) -> pd.DataFrame:
         """
-        Load and preprocess single data file with enhanced validation.
+        Load and preprocess a single DHS data file.
+
+        Loads the specified file, applies missing value thresholds to remove
+        columns with insufficient data, standardizes values using replacement
+        mappings, and adds a year identifier column.
+
+        Args:
+            file_path: Path to the DHS data file (.DTA format)
+            year: Survey year to add as 'hv007' column
+
+        Returns:
+            Preprocessed DataFrame with standardized values
         """
         df = pd.read_stata(file_path, columns=self.config["columns_to_include"])
         df["hv007"] = year
@@ -229,7 +281,17 @@ class DataProcessor:
 
     def _replace_values(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Replace values while properly handling different data types.
+        Replace values in the DataFrame according to replacement rules.
+
+        Applies both special column-specific mappings and general value
+        replacements, handling numeric and categorical columns appropriately
+        to maintain data type integrity.
+
+        Args:
+            df: Input DataFrame to process
+
+        Returns:
+            DataFrame with standardized values
         """
         df_processed = df.copy()
 
@@ -242,6 +304,7 @@ class DataProcessor:
             # Regular replacement logic for other columns
             col_type = self.determine_column_type(df_processed[col])
 
+            # Handle numeric columns with numeric replacements
             if col_type == "numeric":
                 df_processed[col] = pd.to_numeric(df_processed[col], errors="coerce")
                 for old_val, new_val in self.replace_values.items():
@@ -252,6 +315,7 @@ class DataProcessor:
                     df_processed[col], errors="coerce"
                 ).astype("float64")
             else:
+                # Handle string/categorical columns with string replacements
                 temp_series = df_processed[col].astype(str)
                 for old_val, new_val in self.replace_values.items():
                     if not isinstance(new_val, (int, float)) or pd.isna(new_val):
@@ -264,7 +328,17 @@ class DataProcessor:
 
     def _get_common_columns(self, dfs: Dict[str, pd.DataFrame]) -> Set[str]:
         """
-        Find columns present in all dataframes with enhanced validation.
+        Find columns that are present and valid across all datasets.
+
+        Identifies columns that exist in all datasets and contain at least
+        some valid (non-missing) values in each dataset, to ensure that
+        only usable common columns are retained.
+
+        Args:
+            dfs: Dictionary of DataFrames to analyze
+
+        Returns:
+            Set of column names common to all datasets
         """
         if not dfs:
             return set()
@@ -317,7 +391,18 @@ class DataProcessor:
         self, dfs: Dict[str, pd.DataFrame], common_columns: Set[str]
     ) -> Dict[str, pd.DataFrame]:
         """
-        Filter dataframes to include only valid common columns.
+        Filter all DataFrames to include only the common column set.
+
+        Creates new DataFrames containing only the columns identified as
+        common across all datasets, with a final validation to ensure
+        data quality.
+
+        Args:
+            dfs: Dictionary of DataFrames to filter
+            common_columns: Set of column names to retain
+
+        Returns:
+            Dictionary of filtered DataFrames
         """
         filtered_dfs = {}
 

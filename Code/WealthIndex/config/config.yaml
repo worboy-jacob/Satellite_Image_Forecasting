@@ -1,7 +1,8 @@
 # Output configuration
 output_file: "wealth_index"
-log_level: "INFO" ###TODO: Update this
+log_level: "INFO" 
 ###TODO: Add comments here for all data
+
 # Data sources configuration
 country_year:
   Senegal: 
@@ -49,54 +50,54 @@ columns_to_include:
   - "hv221"  # Has telephone
   
   # Additional household assets and characteristics
-  - "hv225"
-  - "hv226"
-  - "hv227"
-  - "hv228"
-  - "hv230a"
-  - "hv230b"
-  - "hv232"
-  - "hv232b"
-  - "hv232y"
-  - "hv234a"
-  - "hv235"
+  - "hv225" # Share toilet with other households
+  - "hv226" # Type of cooking fuel
+  - "hv227" # Has mosquito bed net for sleeping
+  - "hv228" # Children under 5 slept under mosquito bed net l
+  - "hv230a" # Place where household members wash their hands
+  - "hv230b" # Presence of water at hand washing place
+  - "hv232" # Items present: Soap or detergent
+  - "hv232b" # Items present: Ash, mud, sand
+  - "hv232y" # Items present: None
+  - "hv234a" # Result of salt test for iodine
+  - "hv235" # Location of source for water
   
-  # Additional household characteristics
-  - "hv237"
-  - "hv237a"
-  - "hv237b"
-  - "hv237c"
-  - "hv237d"
-  - "hv237e"
-  - "hv237f"
-  - "hv237x"
-  - "hv237z"
+  # Water treatment
+  - "hv237" # Anything done to water to make safe to drink
+  - "hv237a" # Water usually treated by: boil
+  - "hv237b" # Water usually treated by: add bleach/chlorine
+  - "hv237c" # Water usually treated by: strain through a clot
+  - "hv237d" # Water usually treated by: use water filter
+  - "hv237e" # Water usually treated by: solar disinfection
+  - "hv237f" # Water usually treated by: let it stand and sett
+  - "hv237x" # Water usually treated by: other
+  - "hv237z" # Water usually treated by: don't know
   
   # More household characteristics
-  - "hv238"
-  - "hv240"
-  - "hv241"
-  - "hv242"
+  - "hv238" # Number of households sharing toilet
+  - "hv240" # Stove has a chimney 
+  - "hv241" # Food cooked in the house/ separate building/ ou
+  - "hv242" # Household has separate room used as kitchen
   
   # Additional variables
-  - "hv243a"
-  - "hv243b"
-  - "hv243c"
-  - "hv243d"
-  - "hv244"
-  - "hv245"
-  - "hv246"
-  - "hv246a"
-  - "hv246b"
-  - "hv246c"
-  - "hv246d"
-  - "hv246e"
-  - "hv246f"
-  - "hv246g"
-  - "hv246h"
-  - "hv247"
-  - "hml1"
-  - "hml2"
+  - "hv243a" # Has mobile telephone
+  - "hv243b" # Has watch 
+  - "hv243c" # Has animal-drawn cart 
+  - "hv243d" # Has boat with a motor
+  - "hv244" # Owns land usable for agriculture 
+  - "hv245" # Hectares of agricultural land (1 decimal)
+  - "hv246" # Owns livestock, herds or farm animals
+  - "hv246a" # Owns cattle
+  - "hv246b" # Owns cows/ bulls 
+  - "hv246c" # Owns horses/ donkeys/ mules
+  - "hv246d" # Owns goats 
+  - "hv246e" # Owns sheep
+  - "hv246f" # Owns chickens/poultry
+  - "hv246g" # Owns camels
+  - "hv246h" # Owns pork
+  - "hv247" # Has bank account
+  - "hml1" # Number of mosquito bed nets
+  - "hml2" # Number of children under mosquito bed net previ
 
 # Value replacement configuration
 replace_val:
@@ -111,14 +112,14 @@ missing_threshold: 0.5
 
 # Analysis configuration
 imputation: "compare"
-verbose: 5 ###The level of detail returned by Parallel. 0 is none, 10 is high for debugging but technically goes up to 100
-skip_optimizing: False ###TODO: Set to false when actually running
+verbose: 5 # The level of detail returned by Parallel. 0 is none, 10 is high for debugging but technically goes up to 100
+skip_optimizing: False 
 
 # FAMD analysis configuration
-n_simulations: 1000 ###TODO: update to 1000 when actually running
+n_simulations: 1000
 plot_contributions: True
 run_parallel_analysis: True
 iqr_multiplier: 2
 normalize_index: True
 
-n_jobs: -1 ###TODO: Can be set as -1 to use all cores, or -2 for all cores except 1
+n_jobs: -1 # Can be set as -1 to use all cores, or -2 for all cores except 1

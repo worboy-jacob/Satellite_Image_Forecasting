@@ -1,7 +1,14 @@
-# KNN.py
+"""
+K-Nearest Neighbors imputation implementation.
+
+Provides an implementation of missing value imputation using the K-Nearest Neighbors
+algorithm, with automated parameter optimization and validation. Handles both
+categorical and numerical data types with appropriate distance metrics and
+modeling approaches for each.
+"""
+
 from src.data_processing.imputation.base_imputer import BaseImputer
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
-from sklearn.model_selection import cross_val_score, train_test_split
 import pandas as pd
 import numpy as np
 from typing import Dict, Any, Tuple, List
@@ -18,7 +25,14 @@ for handler in logger.handlers:
 
 
 class KNNImputer(BaseImputer):
-    """K-Nearest Neighbors imputation implementation."""
+    """
+    K-Nearest Neighbors imputation implementation.
+
+    Uses K-Nearest Neighbors algorithm to impute missing values by finding
+    similar samples based on other features. Automatically optimizes parameters
+    like k values, distance metrics, and algorithm settings for each column.
+    Handles both categorical and numeric data with appropriate models.
+    """
 
     def _generate_all_column_parameter_combinations(
         self,
@@ -26,7 +40,21 @@ class KNNImputer(BaseImputer):
         columns_with_na: List[str],
         validation_masks: Dict[str, pd.Series],
     ) -> List[Tuple[str, Dict[str, Any]]]:
-        """Generate all column and parameter combinations upfront."""
+        """
+        Generate all column and parameter combinations for testing.
+
+        Creates parameter combinations for each column with missing values,
+        taking into account the column type and data characteristics to
+        create appropriate parameter sets.
+
+        Args:
+            df: DataFrame containing the data
+            columns_with_na: List of columns with missing values
+            validation_masks: Dictionary of validation masks for each column
+
+        Returns:
+            List of tuples containing (column_name, parameters, column_type)
+        """
         all_combinations = []
         for column in columns_with_na:
             # Get column type and prepare data
@@ -58,8 +86,25 @@ class KNNImputer(BaseImputer):
         country_year: str,
         pbar: tqdm,
     ) -> Tuple[str, Dict[str, Any], float]:
-        """Validate a single parameter combination for a column."""
-        # Handle None values in parameters that can't be None
+        """
+        Validate a single parameter combination for a column.
+
+        Tests how well a specific KNN configuration imputes a column by
+        comparing imputed values to known values in the validation set.
+
+        Args:
+            df: DataFrame containing the data
+            column: Name of the column to validate
+            params: Parameter configuration to test
+            col_type: Type of the column ('numeric' or 'categorical')
+            validation_mask: Mask for validation data
+            country_year: Country-year identifier for logging
+            pbar: Progress bar to update
+
+        Returns:
+            Tuple containing (column_name, parameters, score)
+        """
+        # Remove p parameter when not using minkowski metric
         if params["metric"] != "minkowski":
             params = {k: v for k, v in params.items() if k != "p" or v is not None}
 
@@ -81,7 +126,24 @@ class KNNImputer(BaseImputer):
         validation_masks: Dict[str, pd.Series],
         country_year: str,
     ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, float]]:
-        """Find optimal parameters for all columns using parallel processing."""
+        """
+        Find optimal parameters for all columns with missing values.
+
+        Tests multiple parameter combinations for each column and selects
+        the best configuration based on imputation quality metrics, using
+        secondary scoring to break ties.
+
+        Args:
+            df: DataFrame containing the data
+            columns_with_na: List of columns with missing values
+            validation_masks: Dictionary of validation masks
+            country_year: Country-year identifier for logging
+
+        Returns:
+            Tuple containing:
+            - Dictionary mapping columns to their optimal parameters
+            - Dictionary mapping columns to their best scores
+        """
         logger.info(
             f"Generating parameter combinations for all columns of {country_year}"
         )
@@ -173,20 +235,44 @@ class KNNImputer(BaseImputer):
     def _calculate_single_secondary_score(
         self, df: pd.DataFrame, column: str, params: Dict[str, Any], pbar: tqdm
     ) -> Tuple[float, Dict[str, Any]]:
-        """Calculate secondary score for a single parameter set."""
+        """
+        Calculate secondary score for a single parameter set.
+
+        Used for breaking ties when multiple parameter sets have the same
+        primary score, based on model complexity and efficiency considerations.
+
+        Args:
+            df: DataFrame containing the data
+            column: Name of the column
+            params: Parameter configuration to evaluate
+            pbar: Progress bar to update
+
+        Returns:
+            Tuple containing (secondary_score, parameters)
+        """
         secondary_score = self._calculate_secondary_score(df, column, params)
         pbar.update(1)
         return secondary_score, params
 
     def _calculate_secondary_score(self, df, target_column, params):
         """
-        Calculate secondary score for tie-breaking.
-        Returns a score between 0 and 1 (lower is better).
-        """
-        # Complexity scores (lower is better)
+        Calculate secondary score for tie-breaking parameter selection.
 
-        # 1. Neighbor count - normalize to 0-1 range
-        # Prefer moderate neighbor counts (not too small, not too large)
+        Evaluates parameter configurations based on complexity and efficiency
+        metrics when multiple configurations have similar imputation quality.
+        Lower scores are better, with values between 0 and 1.
+
+        Args:
+            df: DataFrame containing the data
+            target_column: Column being imputed
+            params: Parameter configuration to evaluate
+
+        Returns:
+            Float score between 0 and 1 (lower is better)
+        """
+        # Complexity scoring factors:
+
+        # 1. Neighbor count - moderate values preferred for balance
         n_neighbors = params["n_neighbors"]
         if n_neighbors <= 5:
             n_neighbors_score = 0.3  # Small k is simple but can be noisy
@@ -240,16 +326,31 @@ class KNNImputer(BaseImputer):
         missing_pct: float,
         column_name: str,
     ) -> List[Dict]:
-        """Generate parameter combinations for KNN imputation."""
+        """
+        Generate parameter combinations for KNN imputation.
+
+        Creates appropriate KNN parameter sets based on data characteristics
+        such as sample size, column type, and missing percentage, using
+        heuristics to focus on likely optimal regions of the parameter space.
+
+        Args:
+            n_samples: Number of samples in the dataset
+            column_type: Type of the column ('numeric' or 'categorical')
+            missing_pct: Percentage of missing values
+            column_name: Name of the column for logging
+
+        Returns:
+            List of parameter dictionaries for evaluation
+        """
         logger.info(
             f"Generating parameters for {column_name} ({column_type}, {missing_pct:.4f}% missing)"
         )
 
-        # --- K Values Strategy ---
+        # K values strategy - centered around square root of sample size
         center_k = int(np.sqrt(n_samples))
         center_k = max(3, min(center_k, 31))
         if center_k % 2 == 0:
-            center_k += 1  # Ensure odd number
+            center_k += 1  # Ensure odd number for tie-breaking
 
         k_spread_factor = (
             0.7 if missing_pct > 30 else (0.4 if missing_pct < 10 else 0.5)
@@ -378,8 +479,28 @@ class KNNImputer(BaseImputer):
         algorithm_options: List[str],
         column_type: str,
     ) -> List[Dict]:
-        """Select key parameter combinations strategically."""
+        """
+        Select a diverse subset of parameter combinations for evaluation.
+
+        Strategically chooses parameter combinations to explore the parameter
+        space efficiently when there are too many possible combinations to
+        evaluate exhaustively.
+
+        Args:
+            combinations: All possible parameter combinations
+            target_count: Target number of combinations to select
+            center_k: Central k value (typically sqrt of n_samples)
+            metrics: List of distance metrics to consider
+            weights_options: List of weighting schemes
+            algorithm_options: List of KNN algorithms
+            column_type: Type of the column ('numeric' or 'categorical')
+
+        Returns:
+            List of selected parameter combinations
+        """
         selected_combinations = []
+
+        # Choose the most appropriate distance metric based on column type
         best_metric = "euclidean" if column_type == "numeric" else "hamming"
 
         # Include center k with different metrics
@@ -467,7 +588,25 @@ class KNNImputer(BaseImputer):
         df: pd.DataFrame,
         column_name: str,
     ) -> float:
-        """Evaluate KNN parameters using validation masks and direct error calculation."""
+        """
+        Evaluate KNN parameters using validation data.
+
+        Tests how well a specific KNN configuration performs by hiding known
+        values, imputing them, and measuring the error between imputed and
+        actual values.
+
+        Args:
+            params: KNN parameters to evaluate
+            full_column: Complete column data
+            validation_mask: Mask for validation data
+            df: DataFrame containing all features
+            column_name: Name of the column being evaluated
+
+        Returns:
+            Normalized error score (0-1 scale, lower is better)
+        """
+
+        # Select appropriate model based on column type
         col_type = self.determine_column_type(full_column)
         # Create a copy of the data for validation
         df_validation = df.copy()
@@ -522,7 +661,26 @@ class KNNImputer(BaseImputer):
         params: Dict[str, Any],
         pbar: tqdm = None,
     ) -> pd.Series:
-        """Impute missing values for a single column using KNN with specified parameters."""
+        """
+        Impute missing values for a single column using KNN.
+
+        Applies KNN imputation with the specified parameters to fill in
+        missing values in the column, handling both numeric and categorical
+        data appropriately.
+
+        Args:
+            df: DataFrame containing the data
+            column: Name of the column to impute
+            validation_mask: Mask for validation data
+            original_dtype: Original data type of the column
+            params: KNN parameters to use
+            pbar: Progress bar to update
+
+        Returns:
+            Series with imputed values
+        """
+
+        # Track performance and prepare data
         self.tracker.start_column(column)
         start_time = time()
         logger.info(f"Imputing column {column}")
@@ -588,10 +746,26 @@ class KNNImputer(BaseImputer):
         return result
 
     def impute(self, df: pd.DataFrame, country_year: str) -> Tuple[pd.DataFrame, float]:
-        """Impute missing values using KNN while preserving original data types."""
+        """
+        Impute missing values using KNN imputation.
+
+        Orchestrates the complete KNN imputation workflow including data preparation,
+        parameter optimization, and imputation for all columns with missing values.
+
+        Args:
+            df: DataFrame with missing values to impute
+            country_year: String identifier for the country and year being processed
+
+        Returns:
+            Tuple containing:
+            - DataFrame with imputed values
+            - Overall imputation quality score
+        """
         logger.info(f"Imputing missing values for dataset: {country_year}")
         self.tracker.start_column("total")
         numerical_columns = []
+
+        # Handle special case of columns with only one unique value
         for col in df.columns:
             unique_values = df[col].dropna().unique()
             if len(unique_values) == 1 and df[col].isna().any():

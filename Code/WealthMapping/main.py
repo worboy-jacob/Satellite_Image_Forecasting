@@ -1,4 +1,11 @@
-# src/main.py
+"""
+Main entry point for the wealth mapping application.
+
+Orchestrates the full wealth mapping pipeline including data loading,
+processing, visualization, and result storage for multiple countries
+and survey years.
+"""
+
 import logging
 from pathlib import Path
 import psutil
@@ -16,11 +23,15 @@ from src.utils.data_loader import load_all_data
 import sys
 import pandas as pd
 
-###TODO: move some of this code to separate files
-
 
 def cleanup_processes():
-    """Kill any potential leftover Python processes from previous runs."""
+    """
+    Kill any leftover Python processes from previous runs.
+
+    Identifies Python processes running grid_processor.py that might
+    have been left hanging from previous executions and terminates them
+    to prevent resource conflicts.
+    """
     current_process = psutil.Process(os.getpid())
     current_pid = current_process.pid
 
@@ -38,7 +49,15 @@ def cleanup_processes():
 
 
 def create_output_directories():
-    """Create necessary output directories if they don't exist."""
+    """
+    Create necessary output directories for storing results.
+
+    Creates a hierarchical directory structure for storing both
+    visualization outputs (maps) and data outputs (geopackages).
+
+    Returns:
+        Tuple containing paths to the wealth map and wealth GPS directories
+    """
     # Create main results directory
     results_dir = get_results_dir()
     results_dir.mkdir(exist_ok=True, parents=True)
@@ -56,7 +75,7 @@ def create_output_directories():
 
 def main():
     try:
-        # Initialize configuration
+        # --- Initialization ---
         cleanup_processes()
         config_path = get_config_path() / "config.yaml"
         config = Config(config_path).config
@@ -66,11 +85,13 @@ def main():
         # Create output directories
         wealth_map_dir, wealth_gps_dir = create_output_directories()
 
+        # --- Data Loading ---
         # Load all country-year data
         country_year_data = load_all_data(config)
         default_crs = config.get("default_crs")
 
-        # Initialize processors
+        # --- Initialize Processing Components ---
+        # Initialize processors and visualizer
         wealth_processor = WealthProcessor(config)
         grid_processor = GridProcessor(config)
 
@@ -81,12 +102,13 @@ def main():
             dpi=config.get("visualization", {}).get("dpi", 300),
         )
 
+        # --- Data Structures for Results ---
         # Lists to store all results and metadata for combined visualization
         all_grids = []  # Store all processed grids
         all_boundaries = {}  # Store boundaries by country code
         grid_info = []  # Store metadata about each grid
 
-        # Process each country-year pair
+        # --- Process Each Country-Year Pair ---
         for country_iso2, country_data in country_year_data.items():
             logger.info(f"Processing country: {country_iso2}")
             country_results = {}
@@ -94,7 +116,7 @@ def main():
             # Convert all boundary data to default_crs
             for year in country_data:
                 country_data[year]["boundary"].to_crs(default_crs, inplace=True)
-                # Store boundary for visualization
+                # Store boundary for later use in combined visualization
                 if country_iso2 not in all_boundaries:
                     all_boundaries[country_iso2] = country_data[year]["boundary"]
 
@@ -127,7 +149,7 @@ def main():
                         default_crs=default_crs,
                     )
 
-                    # Add country and year columns to the grid
+                    # Add country and year identifiers to enable filtering in GIS applications
                     final_grid["country_iso2"] = country_iso2
                     final_grid["year"] = year
 
@@ -157,7 +179,7 @@ def main():
                     # Continue with next year even if this one fails
                     continue
 
-        # Create combined data file
+        # --- Create and Save Combined Visualization ---
         if all_grids:
             # Save combined result to WealthGPS directory
             combined_grid = gpd.GeoDataFrame(pd.concat(all_grids, ignore_index=True))
@@ -169,7 +191,7 @@ def main():
             # Create combined visualization with subplots
             logger.info("Creating combined visualization with all country-year pairs")
 
-            # Determine grid layout for subplots
+            # Determine grid layout for subplots - max 3 columns, as many rows as needed
             total_plots = len(all_grids)
             if total_plots <= 3:
                 n_cols = total_plots
@@ -186,15 +208,15 @@ def main():
                 n_rows, n_cols, figsize=combined_figsize, constrained_layout=True
             )
 
-            # Handle case where axes is not an array (single subplot)
+            # Handle edge case where there's only one subplot
             if total_plots == 1:
                 axes = np.array([axes])
 
-            # Flatten axes array for easy iteration
+            # Flatten axes array for consistent indexing regardless of grid shape
             if total_plots > 1:
                 axes = axes.flatten()
 
-            # Calculate global min and max for standardized colormap
+            # Calculate global min and max for consistent color scale across all maps
             global_min = min(grid_df["wealth_index"].min() for grid_df in all_grids)
             global_max = max(grid_df["wealth_index"].max() for grid_df in all_grids)
             norm = plt.Normalize(global_min, global_max)

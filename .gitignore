@@ -1,1 +1,3 @@
 data/Results/SatelliteImageData/
+*.pyc
+__pycache__/

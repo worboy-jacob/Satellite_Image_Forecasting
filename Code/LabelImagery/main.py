@@ -2,11 +2,14 @@
 import os
 import sys
 import yaml
-import numpy as np
-import pandas as pd
-from label import load_grid_cells, load_wealth_data, calculate_coverage, apply_threshold
-from logging_config import setup_logging
-from paths import (
+from src.core.label import (
+    load_grid_cells,
+    load_wealth_data,
+    calculate_coverage,
+    apply_threshold,
+)
+from src.utils.logging_config import setup_logging
+from src.utils.paths import (
     get_config_dir,
     get_grid_path,
     get_wealthindex_paths,
@@ -30,8 +33,8 @@ def main():
         logger.error(f"Error loading configuration: {e}")
         sys.exit(1)
 
-    # Extract configuration values
-    threshold = config.get("threshold", 30)  # Default to 30% if not specified
+    # Extract configuration values for threshold and countries
+    threshold = config.get("threshold", 30)
     countries = config.get(
         "countries", ["SN", "GH"]
     )  # Default to both countries if not specified
@@ -43,6 +46,7 @@ def main():
     logger.info(f"Processing countries: {', '.join(countries)}")
     logger.info(f"Force reprocessing existing files: {force_reprocess}")
 
+    ###Loading paths
     grid_base_path = get_grid_path()
     wealth_gpkg_paths = get_wealthindex_paths()
     output_dir = get_output_dir()
@@ -81,7 +85,9 @@ def main():
             logger.info(f"Loading grid cells for {country_name}...")
             grid_gdf = load_grid_cells(grid_path)
             if country_name == "Senegal":
-                grid_gdf.to_crs("EPSG:32628", inplace=True)
+                grid_gdf.to_crs(
+                    "EPSG:32628", inplace=True
+                )  # Setting the crs for area calculations
             elif country_name == "Ghana":
                 grid_gdf.to_crs("EPSG:32630", inplace=True)
             logger.info(f"Grid for {country_name} loaded with crs: {grid_gdf.crs}")
@@ -137,6 +143,7 @@ def main():
             output_filename = f"{country_name}_{year}_wealthindex_labelled.gpkg"
             output_path = output_dir / output_filename
 
+            # Skipping processing if it already exists and isn't forced
             if output_path.exists() and not force_reprocess:
                 logger.info(
                     f"Skipping {country_name} {year} - output file already exists"
@@ -149,7 +156,7 @@ def main():
             # Load wealth data
             wealth_gdf = load_wealth_data(wealth_path)
 
-            # Apply the grid to wealth data calculation
+            # Apply the grid to wealth data calculation and setting the crs to match the country crs
             grid_gdf = grid_gdfs[country_code].copy()
             if country_code == "SN":
                 wealth_gdf_new = wealth_gdf.to_crs("EPSG:32628")
@@ -161,7 +168,7 @@ def main():
             logger.info(f"Calculating coverage for {country_name} {year}...")
             result_gdf = calculate_coverage(grid_gdf, wealth_gdf)
 
-            # Apply threshold
+            # Apply threshold and removing extra indices
             logger.info(
                 f"Applying {threshold}% threshold to {country_name} {year} data..."
             )

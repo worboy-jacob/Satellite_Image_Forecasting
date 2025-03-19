@@ -1,3 +1,11 @@
+"""
+Factor Analysis of Mixed Data (FAMD) implementation for wealth index calculation.
+
+This module provides tools to calculate wealth indices from household survey data
+using FAMD, with support for parallel processing, component significance testing,
+and visualization of results.
+"""
+
 import pandas as pd
 import numpy as np
 from prince import FAMD
@@ -46,7 +54,12 @@ class FAMDAnalyzer:
     def _get_effective_n_jobs(self) -> int:
         """
         Convert n_jobs parameter to actual number of jobs.
-        Handles negative values as per joblib convention.
+
+        Handles negative values according to joblib convention, where
+        -1 means using all processors, -2 means using all but one, etc.
+
+        Returns:
+            Number of jobs to use for parallel processing
         """
         if self.n_jobs < 0:
             # Convert negative n_jobs to positive
@@ -58,7 +71,20 @@ class FAMDAnalyzer:
     def _run_parallel_analysis(
         self, famd, df: pd.DataFrame, n_simulations: int
     ) -> list:
-        """Run parallel analysis to determine significant components."""
+        """
+        Run parallel analysis to determine statistically significant components.
+
+        Performs Monte Carlo simulations to identify components with eigenvalues
+        greater than those from randomly generated data.
+
+        Args:
+            famd: Fitted FAMD model
+            df: Input data frame
+            n_simulations: Number of simulations to perform
+
+        Returns:
+            List of indices for significant components
+        """
         n_samples, n_features = df.shape
         real_eigenvalues = pd.to_numeric(famd.eigenvalues_summary["eigenvalue"]).astype(
             np.float32
@@ -91,6 +117,8 @@ class FAMDAnalyzer:
                         "n_categories": len(categories),
                     }
                 )
+
+        # Estimate memory requirements to determine optimal batch size
         memory_per_row = (
             n_features * 4  # float32 for numeric
             + memory_per_category  # categorical overhead
@@ -108,6 +136,8 @@ class FAMDAnalyzer:
         logger.info(
             f"Using {effective_n_jobs} processes with batch size of {batch_size}"
         )
+
+        # Process simulations in batches to manage memory usage
         simulated_eigenvalues = []
         n_batches = (n_simulations + batch_size - 1) // batch_size
         for batch_idx in range(n_batches):
@@ -142,7 +172,16 @@ class FAMDAnalyzer:
         return significant_components
 
     def _plot_contributions(self, famd: FAMD, components: list):
-        """Plot column contributions for selected components."""
+        """
+        Visualize how variables contribute to principal components.
+
+        Creates a heatmap showing the contribution of each variable to the
+        selected components and saves it to the results directory.
+
+        Args:
+            famd: Fitted FAMD model
+            components: List of component indices to include in the plot
+        """
         contributions = famd.column_contributions_
 
         # Create heatmap
@@ -162,14 +201,30 @@ class FAMDAnalyzer:
         plt.close()
 
     def calculate_wealth_index(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Calculate wealth index using FAMD."""
+        """
+        Calculate household wealth index using Factor Analysis of Mixed Data.
+
+        Processes household survey data, applying FAMD to extract components,
+        then combines them into a weighted wealth index correlated with
+        standard wealth indicators.
+
+        Args:
+            df: DataFrame containing household survey data
+
+        Returns:
+            DataFrame with household IDs and calculated wealth index
+        """
         logger.info("Starting wealth index calculation")
 
         # Prepare data
         df_processed = df.copy()
+
+        # Identify household ID columns
         id_cols = ["hv000", "hv001", "hv005", "hv007"]
         df_ids = df_processed[id_cols]
         df_processed = df_processed.drop(columns=id_cols)
+
+        # Convert potential numeric columns stored as strings
         numeric_cols = df_processed.select_dtypes(include=["object"]).columns
         for col in numeric_cols:
             # Try to convert to numeric, identifying actual numeric columns
@@ -217,6 +272,7 @@ class FAMDAnalyzer:
         if self.config.get("plot_contributions", False):
             self._plot_contributions(famd, components)
 
+        # Define indicators that correlate with household wealth
         wealth_indicators = {
             "hv206": ["yes"],  # Has electricity
             "hv207": ["yes"],  # Has radio
@@ -225,6 +281,8 @@ class FAMDAnalyzer:
             "hv211": ["yes"],  # Has motorcycle
             "hv212": ["yes"],  # Has car
         }
+
+        # Calculate a simple wealth score to determine component directions
         wealth_score = np.zeros(len(df_processed))
         for col, values in wealth_indicators.items():
             if col in df_processed.columns:
@@ -234,6 +292,9 @@ class FAMDAnalyzer:
                     except Exception as e:
                         logger.warning(f"Error processing indicator {col}: {e}")
         row_coords = famd.row_coordinates(df_processed)
+
+        # Determine which components correlate negatively with wealth
+        # These need to be inverted to ensure consistent wealth index direction
         invert_components = []
         component_correlations = []
         for comp in components:
@@ -283,6 +344,20 @@ class FAMDAnalyzer:
         return result
 
     def _simulation_wrapper_optimized(self, n_features, n_samples, column_info):
+        """
+        Generate random data and calculate FAMD eigenvalues for parallel analysis.
+
+        Creates synthetic data matching the statistical properties of the original
+        dataset, then performs FAMD to get eigenvalues for significance testing.
+
+        Args:
+            n_features: Number of features/columns
+            n_samples: Number of samples/rows
+            column_info: List of dictionaries with column metadata
+
+        Returns:
+            Series of eigenvalues from FAMD on random data
+        """
         start_time = time()
         data_dict = {}
         rng = np.random.default_rng()
@@ -312,14 +387,14 @@ class FAMDAnalyzer:
             probs = col["probabilities"].astype(np.float32)
             probs /= probs.sum()  # Normalize to ensure sum is exactly 1
 
-            # Generate indices efficiently using cumsum method for large arrays
+            # Handle categorical data generation with memory-efficient approach
             if len(col["categories"]) > np.iinfo(np.int32).max:
-                # For very large category counts, use alternative method
+                # For extremely large category counts, use cumulative probability approach
                 cumprobs = np.cumsum(probs)
                 random_values = rng.random(n_samples, dtype=np.float32)
                 cat_indices = np.searchsorted(cumprobs, random_values)
             else:
-                # For smaller category counts, use standard choice
+                # For typical category counts, use direct sampling
                 cat_indices = rng.choice(
                     len(col["categories"]),
                     size=n_samples,

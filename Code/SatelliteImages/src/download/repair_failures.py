@@ -4,66 +4,31 @@ Repair tool for failed Sentinel and VIIRS data downloads.
 
 This script scans for failure logs generated during Sentinel and VIIRS data processing,
 and attempts to repair the failed downloads by retrying the specific operations that failed.
+
+Also includes a function to just scan for missing data and create failure logs.
 """
 
-import os
 import json
-import time
-import random
 import logging
-import argparse
 import concurrent.futures
 import gc
-import tempfile
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Tuple, Any, Optional, Set
 
-import ee
 import numpy as np
-import pandas as pd
 import geopandas as gpd
-import rasterio
-from rasterio.transform import from_origin
-import requests
 from tqdm import tqdm
 import sys
 import traceback
 
-# Import necessary modules from sentinel and viirs
-from src.utils.paths import get_data_dir, get_results_dir
-from src.processing.resampling import (
-    process_and_save_bands,
-    process_and_save_viirs_bands,
-    cleanup_original_files,
-    calculate_nightlight_gradient,
-)
+from src.utils.paths import get_results_dir
 
 # Configure logging
 logger = logging.getLogger("image_processing")
 
-# Make sure flush works correctly for all handlers
 for handler in logger.handlers:
     handler.flush = sys.stdout.flush
-# Constants
-BAND_RESOLUTION = {
-    # 10m bands
-    "B2": 10,
-    "B3": 10,
-    "B4": 10,
-    "B8": 10,
-    # 20m bands
-    "B5": 20,
-    "B6": 20,
-    "B7": 20,
-    "B8A": 20,
-    "B11": 20,
-    "B12": 20,
-    # 60m bands
-    "B1": 60,
-    "B9": 60,
-    "B10": 60,
-}
 
 
 class RepairFailureLogger:
@@ -81,7 +46,18 @@ class RepairFailureLogger:
     def log_repair_attempt(
         self, cell_id, error_type, original_error, repair_result, details=None
     ):
-        """Log a repair attempt to the persistent file."""
+        """log_repair_attempt Log a repair attempt to the persistent file.
+
+        Args:
+            cell_id: The cell that was attempted to be repaired
+            error_type: The original error type
+            original_error: The original error
+            repair_result: Information on the result of the repaid
+            details: Specific details on the repair result. Defaults to None.
+
+        Returns:
+            Dict: A record of the repair attempt for logging
+        """
         details = details or {}
 
         repair_record = {
@@ -100,7 +76,7 @@ class RepairFailureLogger:
         with open(self.repair_log_file, "a") as f:
             f.write(json.dumps(repair_record) + "\n")
 
-        # Also create a cell-specific repair file for easy lookup
+        # Also create a cell-specific repair file
         cell_repair_file = self.repairs_dir / f"cell_{cell_id}_repair.json"
 
         # If the file exists, read it first to append
@@ -124,12 +100,20 @@ class RepairFailureLogger:
         return repair_record
 
     def get_repair_summary(self):
-        """Get a summary of all repair attempts."""
-        if not self.repair_log_file.exists():
+        """get_repair_summary Get a summary of all repair attempts.
+
+        Returns:
+            Dict: dictionary containing the repair summary
+        """
+        if (
+            not self.repair_log_file.exists()
+        ):  # Checking for existance of a repair attempt
             return {"total_attempts": 0, "successful_repairs": 0, "repairs_by_type": {}}
 
         repairs = []
-        with open(self.repair_log_file, "r") as f:
+        with open(
+            self.repair_log_file, "r"
+        ) as f:  # Getting all the previous repair info
             for line in f:
                 try:
                     repairs.append(json.loads(line.strip()))
@@ -140,7 +124,7 @@ class RepairFailureLogger:
         repair_types = {}
         successful_repairs = 0
 
-        for repair in repairs:
+        for repair in repairs:  # Classifying repair
             error_type = repair.get("error_type", "unknown")
             success = repair.get("success", False)
 
@@ -179,8 +163,7 @@ def repair_country_year_failures(
     config: Dict[str, Any],
     max_repair_attempts: int = 100,
 ) -> Dict[str, Any]:
-    """
-    Repair all failures for a specific country-year by reprocessing all failed cells.
+    """repair_country_year_failures Repair all failures for a specific country-year by reprocessing all failed cells.
     This uses a different approach from the per-cell repair, instead rerunning the
     full download pipeline on only the cells with failures.
 
@@ -190,10 +173,10 @@ def repair_country_year_failures(
         year: Year to process
         grid_gdf: GeoDataFrame with grid cells
         config: Configuration dictionary
-        max_repair_attempts: Maximum number of repair attempts
+        max_repair_attempts: Maximum number of repair attempts. Defaults to 100.
 
     Returns:
-        Dictionary with repair results
+        Dict[str, Any]: Dictionary with repair results
     """
     logger = logging.getLogger("image_processing")
 
@@ -263,7 +246,7 @@ def repair_country_year_failures(
                 if isinstance(cell_id, int):
                     failed_cell_ids.add(cell_id)
 
-        # Remove any batch failures from the count
+        # Remove any batch failures from the count to focus on individual cells only
         failed_cell_ids = {
             cell_id
             for cell_id in failed_cell_ids
@@ -275,7 +258,6 @@ def repair_country_year_failures(
             logger.info(f"No cell-specific failures found to repair")
             break
 
-        # Remove cells that have consistently failed
         cells_to_repair = failed_cell_ids
 
         if not cells_to_repair:
@@ -356,6 +338,8 @@ def repair_country_year_failures(
                 logger.info(
                     f"Running Sentinel download for {len(repair_grid_gdf)} cells"
                 )
+
+                # Pass the filtered grid to the download function to attempt to redownload the cell
                 download_sentinel_for_country_year(
                     config, country_name, year, repair_grid_gdf
                 )
@@ -367,6 +351,7 @@ def repair_country_year_failures(
                     config, country_name, year, repair_grid_gdf
                 )
             else:
+                # Recording results of incorrect data_type
                 logger.error(f"Unknown data type: {data_type}")
                 round_record["status"] = "error"
                 round_record["error"] = f"Unknown data type: {data_type}"
@@ -429,7 +414,7 @@ def repair_country_year_failures(
             f"Repaired {len(repaired_cells)} cells, {len(new_failed_cell_ids)} cells still have issues"
         )
 
-        # If we have no more failures, we're done
+        # If we have no more failures, exit the loop
         if not new_failed_cell_ids:
             logger.info("All cells successfully repaired!")
             break
@@ -462,8 +447,7 @@ def scan_for_missing_data(
     expected_bands: Optional[Dict[str, List[str]]] = None,
     max_workers: int = 12,  # Number of parallel workers
 ) -> None:
-    """
-    Scan processed data files to identify missing bands or indices and create failure logs.
+    """scan_for_missing_data Scan processed data files to identify missing bands or indices and create failure logs.
     Skip cells that already have failure logs to avoid duplication.
     Uses parallel processing to speed up scanning.
 
@@ -471,9 +455,11 @@ def scan_for_missing_data(
         data_type: Either 'sentinel' or 'viirs'
         country_name: Name of the country
         year: Year to check
-        expected_bands: Dictionary mapping data types to lists of expected bands/indices
-                       If None, uses defaults for each data type
-        max_workers: Maximum number of parallel workers
+        expected_bands: Dictionary mapping data types to lists of expected bands/indices. Defaults to None.
+        max_workers: Maximum number of parallel workers. Defaults to 12.
+
+    Returns:
+        Dict: Dictionary of information on missing data
     """
     logger = logging.getLogger("image_processing")
     logger.info(
@@ -509,7 +495,7 @@ def scan_for_missing_data(
     failures_dir.mkdir(parents=True, exist_ok=True)
     failure_log_file = failures_dir / "failure_log.jsonl"
 
-    # Get existing cell failures to avoid duplication
+    # Get existing cell failures to avoid rechecking
     existing_failures = set()
     if failure_log_file.exists():
         with open(failure_log_file, "r") as f:
@@ -539,7 +525,7 @@ def scan_for_missing_data(
         # Skip cells that already have failure logs
         if str(cell_id) in existing_failures:
             logger.debug(f"Skipping cell {cell_id} - already has failure logs")
-            return {
+            return {  # Log the skip for future review
                 "status": "skipped",
                 "cell_id": cell_id,
                 "reason": "existing_failure",
@@ -569,7 +555,7 @@ def scan_for_missing_data(
                 "details": {"expected_file": str(processed_file)},
             }
 
-            return {
+            return {  # Creating a failure for repairs
                 "status": "failure",
                 "cell_id": cell_id,
                 "failure_record": failure_record,
@@ -597,7 +583,7 @@ def scan_for_missing_data(
                         zero_bands.append(band)
 
                 if missing_bands or zero_bands:
-                    failure_record = {
+                    failure_record = {  # Create a failure if anything is missing or 0
                         "timestamp": datetime.now().isoformat(),
                         "country": country_name,
                         "year": year,
@@ -650,7 +636,7 @@ def scan_for_missing_data(
             f"Processing batch {i//batch_size + 1}/{(len(cell_dirs) + batch_size - 1)//batch_size}"
         )
 
-        # Use ThreadPoolExecutor since this is primarily I/O bound
+        # Use ThreadPoolExecutor
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(process_cell_dir, cell_dir) for cell_dir in batch
@@ -670,7 +656,7 @@ def scan_for_missing_data(
                 elif result["status"] == "failure":
                     failures_count += 1
 
-                    # Write to failure logs (need to handle file locking)
+                    # Write to failure logs
                     with open(failure_log_file, "a") as f:
                         f.write(json.dumps(result["failure_record"]) + "\n")
 
@@ -684,7 +670,7 @@ def scan_for_missing_data(
                 del result
                 if (skipped_count + failures_count + success_count) % 100 == 0:
                     gc.collect()
-        # Force garbage collection after each batch
+
         gc.collect()
         logger.info(
             f"Completed batch {i//batch_size + 1}, processed {i+len(batch)}/{len(cell_dirs)} cells"

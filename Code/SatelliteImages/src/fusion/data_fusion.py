@@ -1,3 +1,6 @@
+"""Used to fuse and save data.
+Combines data from sentinel and viirs into one array."""
+
 import numpy as np
 import os
 from pathlib import Path
@@ -7,7 +10,6 @@ import json
 from datetime import datetime
 from tqdm import tqdm
 import concurrent.futures
-import pandas as pd
 import sys
 from src.utils.paths import get_results_dir
 import traceback
@@ -27,6 +29,9 @@ def combine_sentinel_viirs_data(
 ) -> Dict[str, int]:
     """
     Combine Sentinel and VIIRS data for specified countries and years.
+
+    Creates combined datasets by merging processed Sentinel-2 optical imagery
+    and VIIRS nightlights data into unified cell files for further analysis.
 
     Args:
         max_workers: Maximum number of parallel workers
@@ -265,6 +270,10 @@ def _combine_single_cell(
     """
     Combine Sentinel and VIIRS data for a single cell.
 
+    Loads the processed data from both sources, merges them with appropriate
+    prefixes to avoid naming conflicts, and saves the combined data along
+    with comprehensive metadata.
+
     Args:
         cell_id: Cell ID
         sentinel_file: Path to Sentinel data file
@@ -273,7 +282,7 @@ def _combine_single_cell(
         delete_originals: Whether to delete original files after successful combination
 
     Returns:
-        Dictionary with processing result
+        Dictionary with processing result including status and combined band information
     """
     logger = logging.getLogger("image_processing")
     result = {"cell_id": cell_id}
@@ -362,8 +371,11 @@ def scan_for_missing_data_combined(
     years: List[int] = None,
 ) -> None:
     """
-    Scan processed data files to identify missing bands or indices and create failure logs.
-    Uses parallel processing to speed up scanning.
+    Scan processed combined data files to identify missing bands or indices.
+
+    Performs integrity checks on the combined Sentinel and VIIRS datasets,
+    verifying that all expected bands are present and valid. Creates detailed
+    failure logs for any issues detected.
 
     Args:
         expected_bands: Dictionary mapping data types to lists of expected bands/indices
@@ -418,6 +430,16 @@ def scan_for_missing_data_combined(
 
     # Define the worker function for parallel processing
     def process_cell_dir_combined(cell_dir, country_name, year):
+        """process_cell_dir_combined _summary_
+
+        Args:
+            cell_dir: Directory of the cell to be saved in
+            country_name: name of the country
+            year: year processing
+
+        Returns:
+            Dict: the status of the combination
+        """ """"""
         cell_id = cell_dir.name.replace("cell_", "")
         try:
             cell_id = int(cell_id)
@@ -455,7 +477,7 @@ def scan_for_missing_data_combined(
                     band for band in expected_file_bands if band not in available_bands
                 ]
 
-                # Check for zero-size or all-zero arrays
+                # Validate data quality by checking for empty or zero-valued arrays
                 zero_bands = []
                 for band in available_bands:
                     band_data = data[band]
@@ -559,7 +581,7 @@ def scan_for_missing_data_combined(
                     elif result["status"] == "failure":
                         failures_count += 1
 
-                        # Write to failure logs (need to handle file locking)
+                        # Write to failure log file - concurrent access handled by file system
                         with open(failure_log_file, "a") as f:
                             f.write(json.dumps(result["failure_record"]) + "\n")
 

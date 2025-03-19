@@ -1,4 +1,10 @@
-# wealth_mapping/visualization/plots.py
+"""
+Visualization module for wealth distribution maps.
+
+Provides functionality for creating and saving geospatial visualizations
+of wealth distribution data using matplotlib and geopandas.
+"""
+
 import matplotlib.pyplot as plt
 import geopandas as gpd
 from typing import Tuple, Optional, Dict, Any
@@ -12,7 +18,15 @@ for handler in logger.handlers:
 
 
 def setup_logging(level_str: str) -> int:
-    """Setup logging configuration."""
+    """
+    Configure logging with the specified level.
+
+    Args:
+        level_str: String representation of logging level (DEBUG, INFO, etc.)
+
+    Returns:
+        Numeric logging level constant from logging module
+    """
     level_map = {
         "DEBUG": logging.DEBUG,
         "INFO": logging.INFO,
@@ -26,7 +40,12 @@ def setup_logging(level_str: str) -> int:
 
 
 class WealthMapVisualizer:
-    """Handles creation and saving of wealth distribution maps."""
+    """
+    Creates and saves geospatial visualizations of wealth distribution.
+
+    Handles the creation of maps showing wealth distribution across geographic
+    areas, with customizable figure size, resolution, and styling.
+    """
 
     def __init__(
         self,
@@ -34,6 +53,14 @@ class WealthMapVisualizer:
         figsize: Tuple[int, int] = (15, 15),
         dpi: int = 300,
     ):
+        """
+        Initialize the visualizer with configuration settings.
+
+        Args:
+            config: Configuration dictionary containing visualization parameters
+            figsize: Size of the figure in inches as (width, height)
+            dpi: Resolution of the output figure in dots per inch
+        """
         self.config = config
         self.figsize = figsize
         self.dpi = dpi
@@ -48,20 +75,27 @@ class WealthMapVisualizer:
         title: Optional[str] = "Wealth Distribution",
     ) -> None:
         """
-        Create wealth distribution map.
+        Create a wealth distribution map visualization.
+
+        Generates a map showing the spatial distribution of wealth indices,
+        with administrative boundaries overlaid for geographic context.
 
         Args:
-            wealth_grid: GeoDataFrame containing processed wealth data
-            boundary: GeoDataFrame containing boundary geometry
-            title: Optional title for the map
+            wealth_grid: GeoDataFrame containing processed wealth data with geometry
+            boundary: GeoDataFrame containing administrative boundary geometry
+            title: Title for the map
+
+        Raises:
+            Exception: If map creation fails
         """
         try:
+            # Create figure and axis
             self.fig, self.ax = plt.subplots(figsize=self.figsize)
 
-            # Plot boundary
+            # Plot administrative boundaries in black
             boundary.boundary.plot(ax=self.ax, color="black", linewidth=1)
 
-            # Plot wealth distribution
+            # Plot wealth grid with colormap and legend
             wealth_grid.plot(
                 column="wealth_index",
                 ax=self.ax,
@@ -81,15 +115,22 @@ class WealthMapVisualizer:
 
     def save_map(self, output_path: str) -> None:
         """
-        Save the created map to file.
+        Save the created map to a file.
 
         Args:
-            output_path: Path where to save the map
+            output_path: File path where the map should be saved
+
+        Raises:
+            ValueError: If save is attempted before creating a map
+            Exception: If saving fails
         """
+
+        # Ensure the map exists before trying to save it
         if self.fig is None:
             raise ValueError("Map must be created before saving")
 
         try:
+            # Save with high quality and proper cropping
             self.fig.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
             plt.close(self.fig)
             logger.info(f"Map saved to {output_path}")

@@ -1,4 +1,11 @@
-# src/core/grid_processor.py
+"""
+Grid processing module for spatial wealth mapping.
+
+Provides functionality for creating uniform grid cells over a geographic area
+and calculating wealth indices for each cell based on survey data. Handles
+spatial operations efficiently using parallel processing.
+"""
+
 import geopandas as gpd
 import pandas as pd
 import numpy as np
@@ -12,9 +19,8 @@ from tqdm import tqdm
 import sys
 import multiprocessing
 from time import time
-import gc  # For garbage collection
+import gc
 
-###TODO: Optimize parallel
 logger = logging.getLogger("wealth_mapping.grid")
 for handler in logger.handlers:
     handler.flush = sys.stdout.flush
@@ -36,7 +42,13 @@ def setup_logging(level_str: str) -> int:
 
 # src/core/grid_processor.py
 class GridProcessor:
-    """Handles creation and processing of spatial grids."""
+    """
+    Handles creation and processing of spatial grids for wealth mapping.
+
+    Creates a uniform grid over a geographic area and calculates wealth indices
+    for each cell based on survey data with appropriate weighting by area and
+    survey weights.
+    """
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
@@ -49,6 +61,9 @@ class GridProcessor:
     def _calculate_weighted_average(self, intersections_df: pd.DataFrame) -> float:
         """
         Calculate double-weighted average using area and survey weights.
+
+        Computes a weighted average that accounts for both the area of intersection
+        between grid cells and survey polygons, and the survey sampling weights.
 
         Args:
             intersections_df: DataFrame with intersection_area, hv005, and wealth_index
@@ -70,7 +85,19 @@ class GridProcessor:
     def _create_grid_cell(
         self, x: float, y: float, cell_size: float, unified_shape, pbar: tqdm
     ) -> Dict[str, Any]:
-        """Create a single grid cell if it intersects with the unified shape."""
+        """
+        Create a single grid cell if it intersects with the study area.
+
+        Args:
+            x: X-coordinate of cell origin
+            y: Y-coordinate of cell origin
+            cell_size: Size of the cell
+            unified_shape: Unified geometry of the study area
+            pbar: Progress bar to update
+
+        Returns:
+            Dictionary with cell geometry if it intersects study area, None otherwise
+        """
         cell = box(x, y, x + cell_size, y + cell_size)
         pbar.update(1)
         if intersects(cell, unified_shape):
@@ -78,7 +105,22 @@ class GridProcessor:
         return None
 
     def _process_cell(self, cell_geom, wealth_data, wealth_union, wealth_sindex, pbar):
-        """Process a single grid cell for wealth calculation."""
+        """
+        Process a single grid cell to calculate its wealth index.
+
+        Identifies survey polygons that intersect with the cell, calculates
+        intersection areas, and computes a weighted wealth index.
+
+        Args:
+            cell_geom: Geometry of the grid cell
+            wealth_data: GeoDataFrame containing wealth survey data
+            wealth_union: Unified geometry of all wealth data
+            wealth_sindex: Spatial index for wealth data
+            pbar: Progress bar to update
+
+        Returns:
+            Dictionary with cell geometry and calculated wealth index, or None if no intersections
+        """
         if not intersects(cell_geom, wealth_union):
             pbar.update(1)
             return None
@@ -121,7 +163,6 @@ class GridProcessor:
             "local_wealth_union": unary_union(intersecting.geometry),
         }
 
-    ###TODO: make chunks for better parallel processing
     def process(
         self,
         boundary: gpd.GeoDataFrame,
@@ -130,29 +171,20 @@ class GridProcessor:
         default_crs: str,
     ) -> gpd.GeoDataFrame:
         """
-        Deal with overlapping polygons
+        Create a grid over the study area and calculate wealth indices for each cell.
 
-        This method creates a grid of cells and processes them against wealth data polygons.
-        When cells are clipped to wealth data boundaries, the resulting geometries will naturally
-        share boundaries with adjacent cells. These shared boundaries appear as:
-        - LineStrings: Where two adjacent cells share an edge
-        - Points: Where corners of cells meet
-        - MultiLineStrings: For complex shared boundaries
-
-        These shared boundaries are not overlaps - they're the expected result of adjacent polygons
-        having common edges. The overlay operation reports these as separate geometries, but they
-        do not represent duplicate or overlapping areas.
+        Generates a regular grid of cells, identifies cells that intersect with the
+        study area, calculates wealth indices based on intersecting survey data, and
+        clips cells to the extent of available data.
 
         Args:
             boundary: GeoDataFrame containing the study area boundary
-            wealth_data: Processed wealth data with geometries
+            wealth_data: Processed wealth data with geometries and indices
             country_crs: Coordinate reference system for the country
             default_crs: Default coordinate reference system to return results in
 
         Returns:
-            GeoDataFrame containing processed grid cells with wealth indices, where each cell
-            is clipped to the extent of its intersection with wealth data. Adjacent cells may
-            share boundaries but do not overlap in area.
+            GeoDataFrame containing processed grid cells with wealth indices
         """
 
         try:
@@ -161,14 +193,15 @@ class GridProcessor:
             logger.info(f"Invalid wealth geometries: {len(invalid_geoms)}")
             logger.info("Starting grid processing pipeline")
             cell_size = self.cell_size
-            # Create base grid
+            # Project data to country CRS and create base grid
             logger.info("Creating base grid")
             boundary.to_crs(country_crs, inplace=True)
             wealth_data.to_crs(country_crs, inplace=True)
             bounds = boundary.total_bounds
             unified_shape = unary_union(boundary.geometry)
             prepare(unified_shape)
-            # Calculate grid dimensions
+
+            # Calculate grid dimensions by extending bounds to full cells
             xmin, ymin, xmax, ymax = [
                 np.floor(bounds[0] / cell_size) * cell_size,
                 np.floor(bounds[1] / cell_size) * cell_size,
@@ -207,7 +240,7 @@ class GridProcessor:
             wealth_sindex = wealth_data.sindex
             wealth_union = unary_union(wealth_data.geometry)
             prepare(wealth_union)
-            ###TODO: keep the other ID columns if need be
+
             # Process intersections and calculate wealth values
             logger.info("Removing unneeded grid cells and calculating wealth index.")
             start_time = time()
@@ -246,14 +279,8 @@ class GridProcessor:
                 lambda row: row.geometry.intersection(row.local_wealth_union), axis=1
             )
             grid = grid.drop(columns=["local_wealth_union"])
-            # The following overlap checks analyze all intersection geometries:
-            # - LineStrings represent shared edges between adjacent cells
-            # - Points represent shared corners
-            # - MultiLineStrings represent complex shared boundaries
-            # - Polygons/MultiPolygons include self-intersections (each cell with itself)
-            # True overlapping areas between different cells would appear as additional
-            # Polygons/MultiPolygons beyond the self-intersections, resulting in
-            # len(polygon_overlaps) - len(grid) > 0
+            # Debug-level validation of cell boundaries and overlaps
+            # Shared edges and corners appear as LineStrings and Points but aren't true overlaps
             if self.config.get("log_level", "INFO") == "DEBUG":
                 logger.debug(f"Number of cells before overlap check: {len(grid)}")
                 logger.debug(

@@ -1,5 +1,5 @@
 # config.yaml
-
+# Country data 
 countries:
   - name: "Senegal"
     iso2: "SN"
@@ -11,22 +11,25 @@ countries:
     crs: "EPSG:32630"  # UTM Zone 30N in meters
     years: [2022]
   
-
+# Used as a default 
 default_crs: "EPSG:4326"  # WGS84 in degrees
 
 wealth_index: wealth_index.parquet
 
-
+# Size of final wealth cells
 cell_size: 500  # meters
 
+# Buffer placed on urban and rural data
 buffer:
   urban: 2000     # meters
   rural: 5050     # meters
 
+# Output visualization
 visualization:
   figsize: [15, 15]
   dpi: 300
 
+# Utility variables
 verbose: 5
 n_jobs: -1
 log_level: "INFO"

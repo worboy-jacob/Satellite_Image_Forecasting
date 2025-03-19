@@ -1,3 +1,3 @@
-threshold: 32
+threshold: 32 # Set the percent cutoff to label cells. Need at this much overlap
 countries: ["SN"]  # Can be ["SN"], ["GH"], or ["SN", "GH"]
 force_reprocess: false   # Set to true to reprocess existing files

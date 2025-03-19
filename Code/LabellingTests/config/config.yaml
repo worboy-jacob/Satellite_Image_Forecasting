@@ -1,10 +1,4 @@
 # Configuration for wealth index coverage threshold analysis
-
-# Required paths
-grid_gpkg_path: "D:/satellite/data/Results/SatelliteImageData/grids/Senegal_grid_5km.gpkg"  # Path to grid cells GeoPackage file
-wealth_gpkg_path: "D:/satellite/data/Results/GPSResults/WealthGPS/SN_2023_output.gpkg"  # Path to wealth index GeoPackage file
-
-# Optional settings
-output_dir: "D:/satellite/data/Results/LabelTestResults"  # Directory to save outputs (optional)
 min_threshold: 30  # Minimum coverage threshold percentage to analyze
 max_threshold: 35  # Maximum coverage threshold percentage to analyze
+threshold_steps: 20 # Number of steps between max and min threshold

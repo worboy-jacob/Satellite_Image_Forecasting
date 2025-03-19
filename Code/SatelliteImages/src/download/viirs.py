@@ -1,39 +1,29 @@
-# viirs.py
+"""
+Download and process VIIRS nightlights data for grid cells covering different countries and years.
+Includes handling for data normalization, gradient calculation, and comprehensive error recovery.
+"""
+
 import concurrent.futures
 import time
 import gc
 import os
-import tempfile
-from functools import lru_cache
-import hashlib
 import ee
 import numpy as np
-import pandas as pd
 import geopandas as gpd
 import logging
 from pathlib import Path
-from datetime import datetime, timedelta
-import time
+from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
 import rasterio
 from rasterio.transform import from_origin
-import calendar
-import multiprocessing
 from tqdm import tqdm
-from joblib import Parallel, delayed
 import sys
-from src.utils.paths import get_data_dir, get_results_dir
+from src.utils.paths import get_results_dir
 import threading
 import psutil
 import functools
 import requests
-from urllib3.util.retry import Retry
-from functools import lru_cache
-import hashlib
-import psutil
-import gc
 from src.processing.resampling import (
-    resample_to_256x256,
     process_and_save_viirs_bands,
     cleanup_original_files,
     calculate_nightlight_gradient,
@@ -41,14 +31,26 @@ from src.processing.resampling import (
 import random
 import json
 import traceback
-import queue
 from queue import Queue, Empty
 
 
 class FailureLogger:
-    """Log and persist failures to a file during processing."""
+    """
+    Log and persist failures to a file during processing.
+
+    Provides thread-safe logging of errors during image processing, storing
+    detailed failure information for later analysis and recovery attempts.
+    """
 
     def __init__(self, output_dir, country_name, year):
+        """
+        Initialize the failure logger.
+
+        Args:
+            output_dir: Base output directory
+            country_name: Name of the country being processed
+            year: Year being processed
+        """
         self.base_dir = output_dir
         self.country_name = country_name
         self.year = year
@@ -58,7 +60,22 @@ class FailureLogger:
         self.lock = threading.Lock()
 
     def log_failure(self, cell_id, error_type, error_message, details=None):
-        """Log a failure to the persistent file."""
+        """
+        Log a failure to the persistent file.
+
+        Creates a detailed record of the failure with timestamp, error details,
+        and traceback information, then saves it to both a central log and
+        a cell-specific file.
+
+        Args:
+            cell_id: The cell that failed
+            error_type: Type of error that occurred
+            error_message: Descriptive message about the error
+            details: Additional context details as a dictionary
+
+        Returns:
+            Dict: A record of the failure information
+        """
         with self.lock:
             failure_record = {
                 "timestamp": datetime.now().isoformat(),
@@ -83,7 +100,15 @@ class FailureLogger:
             return failure_record
 
     def get_failure_summary(self):
-        """Get a summary of all failures."""
+        """
+        Get a summary of all failures.
+
+        Reads the failure log and summarizes failures by type to provide
+        an overview of processing issues.
+
+        Returns:
+            Dict: Summary of failures including counts by error type
+        """
         if not self.failure_log_file.exists():
             return {"total_failures": 0, "failures_by_type": {}}
 
@@ -109,10 +134,15 @@ class FailureLogger:
 class ValueTracker:
     """
     Track the range and average of values across multiple cells.
-    Thread-safe implementation to collect statistics during parallel processing.
+
+    Thread-safe implementation to collect statistics during parallel processing,
+    tracking min, max, and average values for normalization and analysis.
     """
 
     def __init__(self):
+        """
+        Initialize the value tracker with default values and load existing stats if available.
+        """
         self.lock = threading.Lock()
         self.stats_dir = get_results_dir() / "Images" / "VIIRS"
         self.stats_dir.mkdir(parents=True, exist_ok=True)
@@ -138,7 +168,11 @@ class ValueTracker:
                     pass  # Keep default values if file is corrupted
 
     def _save_stats(self):
-        """Save the current min/max values to the stats file."""
+        """
+        Save the current min/max values to the stats file.
+
+        Creates a JSON file with current statistics for persistence between runs.
+        """
         stats = {
             "max": self.max_values,
             "min": self.min_values,
@@ -150,6 +184,9 @@ class ValueTracker:
     def update(self, data_type: str, values: np.ndarray, sample_limit: int = 10000):
         """
         Update statistics with values from a new cell.
+
+        Incorporates new values into the running statistics, updating min, max,
+        and average values for the specified data type.
 
         Args:
             data_type: Type of data ('nightlights' or 'gradients')
@@ -191,7 +228,7 @@ class ValueTracker:
         Get the current statistics.
 
         Returns:
-            Dict containing min, max, and average values for each data type
+            Dict: Dictionary containing min, max, and average values for each data type
         """
         with self.lock:
             stats = {}
@@ -217,7 +254,11 @@ class ValueTracker:
             return stats
 
     def log_statistics(self):
-        """Log the current statistics."""
+        """
+        Log the current statistics.
+
+        Outputs the current min, max, and average values to the log for monitoring.
+        """
         stats = self.get_statistics()
 
         logger.info("===== VIIRS Value Range Statistics =====")
@@ -251,12 +292,6 @@ class ValueTracker:
         logger.info("========================================")
 
 
-# Global variables for normalization constants
-VIIRS_LOG_MIN = None
-VIIRS_LOG_MAX = None
-GRADIENT_MIN = None
-GRADIENT_MAX = None
-
 # Value tracker for statistics
 value_tracker = ValueTracker()
 
@@ -266,33 +301,63 @@ for handler in logger.handlers:
 
 
 class RequestCounter:
-    """Track the number of requests made to Earth Engine."""
+    """
+    Track the number of requests made to Earth Engine.
+
+    Thread-safe counter for monitoring API usage and detecting stalls or
+    rate-limiting issues during processing.
+    """
 
     def __init__(self):
+        """Initialize the request counter with an empty dictionary."""
         self.counts = {}
         self.lock = threading.Lock()
 
     def increment(self, cell_id, count=1):
-        """Increment the request count for a cell."""
+        """
+        Increment the request count for a cell.
+
+        Args:
+            cell_id: Identifier for the cell or thread
+            count: Number to increment by (default: 1)
+        """
         with self.lock:
             if cell_id not in self.counts:
                 self.counts[cell_id] = 0
             self.counts[cell_id] += count
 
     def get_count(self, cell_id):
-        """Get the request count for a cell."""
+        """
+        Get the request count for a cell.
+
+        Args:
+            cell_id: Identifier for the cell or thread
+
+        Returns:
+            int: Number of requests for the specified cell
+        """
         with self.lock:
             return self.counts.get(cell_id, 0)
 
     def get_average(self):
-        """Get the average number of requests per cell."""
+        """
+        Get the average number of requests per cell.
+
+        Returns:
+            float: Average number of requests across all cells
+        """
         with self.lock:
             if not self.counts:
                 return 0
             return sum(self.counts.values()) / len(self.counts)
 
     def get_summary(self):
-        """Get a summary of request counts."""
+        """
+        Get a summary of request counts.
+
+        Returns:
+            str: Summary of request statistics
+        """
         with self.lock:
             if not self.counts:
                 return "No requests tracked"
@@ -303,12 +368,254 @@ class RequestCounter:
 request_counter = RequestCounter()
 
 
+class ProcessingMonitor:
+    """
+    Monitors processing and handles recovery operations for Earth Engine processing.
+
+    Provides monitoring of request rates, detects stalled processes, and implements
+    various levels of recovery actions to keep processing running smoothly.
+    """
+
+    def __init__(self):
+        """Initialize monitoring state variables."""
+        self.last_request_count = 0
+        self.last_active_time = time.time()
+        self.consecutive_stalls = 0
+        self.recovery_attempts = 0
+        self.last_worker_restart = time.time()
+        self.rate_history = []
+        self.last_count = 0
+        self.last_time = time.time()
+
+    def monitor_request_rate(self, stop_event):
+        """
+        Monitor the Earth Engine request rate with moving average.
+
+        Runs as a background thread to track API requests per minute,
+        reporting usage relative to rate limits.
+
+        Args:
+            stop_event: Threading event to signal when monitoring should stop
+        """
+        while not stop_event.is_set():
+            try:
+                current_count = sum(request_counter.counts.values())
+                current_time = time.time()
+
+                elapsed = current_time - self.last_time
+                requests = current_count - self.last_count
+
+                if elapsed > 0:
+                    current_rate = requests / elapsed * 60  # requests per minute
+                    self.rate_history.append(current_rate)
+
+                    # Keep only the last 5 measurements for moving average
+                    if len(self.rate_history) > 5:
+                        self.rate_history.pop(0)
+
+                    avg_rate = sum(self.rate_history) / len(self.rate_history)
+
+                    # Calculate percentage of Earth Engine limit
+                    limit_percentage = avg_rate / 6000 * 100
+
+                    logger.info(
+                        f"Earth Engine request rate: {current_rate:.1f} req/min (avg: {avg_rate:.1f}, {limit_percentage:.1f}% of limit)"
+                    )
+
+                self.last_count = current_count
+                self.last_time = current_time
+
+            except Exception as e:
+                logger.error(f"Error in request rate monitoring: {e}")
+
+            time.sleep(15)
+
+    def monitor_and_recover_processing(self, stop_event):
+        """
+        Monitor processing status and perform recovery actions when stalled.
+
+        Detects processing stalls and implements escalating recovery strategies,
+        including garbage collection, cache clearing, session refresh, and
+        ultimately process restart if necessary.
+
+        Args:
+            stop_event: Threading event to signal when monitoring should stop
+        """
+        while not stop_event.is_set():
+            try:
+                current_count = sum(request_counter.counts.values())
+                current_time = time.time()
+
+                # Monitor memory usage for leaks
+                process = psutil.Process(os.getpid())
+                current_memory = process.memory_info().rss / (1024 * 1024)
+
+                # Check if requests are being made
+                if current_count > self.last_request_count:
+                    # Activity detected, reset stall counter
+                    self.consecutive_stalls = 0
+                    self.recovery_attempts = (
+                        0  # Reset recovery attempts on successful activity
+                    )
+                    self.last_active_time = current_time
+                    self.last_request_count = current_count
+                    logger.debug(
+                        f"Processing active: {current_count - self.last_request_count} new requests, "
+                        f"Memory: {current_memory:.1f} MB"
+                    )
+                else:
+                    # No new requests detected
+                    elapsed = current_time - self.last_active_time
+                    if elapsed > 120:  # 2 minutes of inactivity
+                        self.consecutive_stalls += 1
+                        logger.warning(
+                            f"Processing appears stalled for {elapsed:.1f} seconds (stall #{self.consecutive_stalls}), "
+                            f"Memory: {current_memory:.1f} MB"
+                        )
+
+                        # After multiple consecutive stalls, try recovery actions
+                        if self.consecutive_stalls >= 2:
+                            self.recovery_attempts += 1
+                            logger.error(
+                                f"Processing stalled for {self.consecutive_stalls} consecutive checks, "
+                                f"attempting recovery (attempt #{self.recovery_attempts})"
+                            )
+
+                            try:
+                                # Escalating recovery actions based on number of attempts
+                                if self.recovery_attempts == 1:
+                                    # First attempt: basic recovery
+                                    self.perform_basic_recovery()
+                                elif self.recovery_attempts == 2:
+                                    # Second attempt: intermediate recovery
+                                    self.perform_intermediate_recovery()
+                                else:
+                                    # Third+ attempt: complete restart
+                                    logger.critical(
+                                        "CRITICAL STALL DETECTED. Initiating full process restart!"
+                                    )
+
+                                    # Save command line arguments and restart the process
+                                    python = sys.executable
+                                    os.execl(python, python, *sys.argv)
+                                    # This will completely restart the current Python process
+
+                            except Exception as e:
+                                logger.error(f"Error during recovery: {e}")
+                                logger.exception("Recovery error details:")
+
+                            # Reset stall counter but not recovery attempts
+                            self.last_active_time = current_time
+                            self.consecutive_stalls = 0
+
+                # Periodic full reset regardless of stalls (every 2 hours)
+                if current_time - self.last_worker_restart > 7200:  # 2 hours
+                    logger.info("Performing scheduled preventative recovery")
+                    self.perform_intermediate_recovery()
+                    self.last_worker_restart = current_time
+
+            except Exception as e:
+                logger.error(f"Error in monitoring thread: {e}")
+
+            time.sleep(30)  # Check every 30 seconds
+
+    def perform_basic_recovery(self):
+        """
+        Perform basic recovery actions for first-level stall detection.
+
+        Implements lightweight recovery actions including garbage collection,
+        cache clearing, and zombie thread detection.
+        """
+        logger.info("Performing basic recovery actions")
+
+        # Force garbage collection
+        gc.collect(generation=2)
+
+        # Clear function caches
+        if hasattr(get_viirs_collection_cached, "cache_clear"):
+            get_viirs_collection_cached.cache_clear()
+
+        # Check for and kill any zombie threads
+        self.check_for_zombie_threads(timeout_seconds=300)  # 5 minutes
+
+    def perform_intermediate_recovery(self):
+        """
+        Perform intermediate recovery for repeated stalls.
+
+        Implements more aggressive recovery including basic recovery actions
+        plus Earth Engine session refresh and HTTP session replacement.
+        """
+        logger.info("Performing intermediate recovery actions")
+
+        # Do basic recovery first
+        self.perform_basic_recovery()
+
+        # Refresh Earth Engine session more aggressively
+        try:
+            logger.info("Refreshing Earth Engine session")
+            ee.Reset()
+            time.sleep(3)
+
+            ee.Initialize(
+                project="wealth-satellite-forecasting",
+                opt_url="https://earthengine-highvolume.googleapis.com",
+            )
+            setup_request_counting()
+        except Exception as e:
+            logger.error(f"Error refreshing Earth Engine: {e}")
+
+        # Create new global HTTP session
+        try:
+            logger.info("Creating new HTTP session with fresh connection pool")
+            global_session = create_optimized_session(
+                max_workers=20, use_high_volume=True
+            )
+
+            # Test the new session
+            test_response = global_session.get(
+                "https://earthengine.googleapis.com", timeout=10
+            )
+            logger.info(f"New session test response: {test_response.status_code}")
+        except Exception as e:
+            logger.error(f"Error creating new session: {e}")
+
+    def check_for_zombie_threads(self, timeout_seconds=300):
+        """
+        Check for and log any threads that have been running too long.
+
+        Identifies non-daemon threads that have been running longer than
+        the specified timeout and logs them as potential zombies.
+
+        Args:
+            timeout_seconds: Thread age threshold in seconds
+        """
+        current_time = time.time()
+        for thread in threading.enumerate():
+            # Skip daemon threads and main thread
+            if thread.daemon or thread.name == "MainThread":
+                continue
+
+            # Check if thread has thread-local start time
+            if (
+                hasattr(thread, "_start_time")
+                and current_time - thread._start_time > timeout_seconds
+            ):
+                logger.warning(
+                    f"Potential zombie thread detected: {thread.name}, "
+                    f"running for {current_time - thread._start_time:.1f} seconds"
+                )
+
+
 def initialize_earth_engine(config):
     """
     Initialize Earth Engine with the appropriate endpoint based on configuration.
-    Includes timeout handling and retry logic.
+
+    Handles authentication, high-volume endpoint selection, and sets up
+    request counting for monitoring API usage.
+
+    Args:
+        config: Configuration dictionary with Earth Engine settings
     """
-    import ee
 
     # Get project ID
     project_id = config.get("project_id", "wealth-satellite-forecasting")
@@ -360,10 +667,18 @@ def initialize_earth_engine(config):
 
 # Modified decorator that uses the global size
 def dynamic_lru_cache(func):
-    """LRU cache decorator that uses the global cache size."""
-    # This is a wrapper around the standard lru_cache
-    # that reads the global size variable
+    """
+    LRU cache decorator that uses the global cache size.
 
+    A wrapper around the standard lru_cache that uses a globally configured
+    cache size, allowing dynamic adjustment during execution.
+
+    Args:
+        func: Function to be cached
+
+    Returns:
+        Wrapped function with dynamic LRU caching
+    """
     # The actual cached function will be stored here
     cached_func = None
 
@@ -397,13 +712,16 @@ def download_viirs_for_country_year(
     grid_gdf: gpd.GeoDataFrame,
 ) -> None:
     """
-    Download VIIRS nightlights data for all cells of a specific country-year pair using optimized parallel processing.
+    Download VIIRS nightlights data for all cells of a specific country-year pair.
+
+    Processes a country-year grid in parallel with optimized memory usage,
+    comprehensive error handling, and recovery mechanisms.
 
     Args:
-        config: Configuration dictionary
-        country_name: Name of the country
+        config: Configuration dictionary with processing parameters
+        country_name: Name of the country to process
         year: Year to process
-        grid_gdf: GeoDataFrame containing the grid cells
+        grid_gdf: GeoDataFrame containing the grid cells to process
     """
     monitor_stop_event = threading.Event()
     recovery_stop_event = threading.Event()
@@ -443,14 +761,18 @@ def download_viirs_for_country_year(
             daemon=True,
         )
         progress_thread.start()
+
+        processing_monitor = ProcessingMonitor()
         monitor_thread = threading.Thread(
-            target=monitor_request_rate, args=(monitor_stop_event,), daemon=True
+            target=processing_monitor.monitor_request_rate,
+            args=(monitor_stop_event,),
+            daemon=True,
         )
         monitor_thread.start()
         monitoring_threads.append(monitor_thread)
 
         recovery_thread = threading.Thread(
-            target=monitor_and_recover_processing,
+            target=processing_monitor.monitor_and_recover_processing,
             args=(recovery_stop_event,),
             daemon=True,
         )
@@ -701,12 +1023,20 @@ def download_viirs_for_country_year(
 
 def create_optimized_session(max_workers=None, use_high_volume=True):
     """
-    Create an optimized requests session with connection pooling and tracking.
+    Create an optimized requests session with connection pooling and retry logic.
+
+    Configures an HTTP session with appropriate timeouts, retry strategies,
+    and connection pool sizes based on the processing requirements.
+
+    Args:
+        max_workers: Number of worker threads (used to size connection pool)
+        use_high_volume: Whether to configure for high-volume endpoint
+
+    Returns:
+        requests.Session: Configured session for Earth Engine API requests
     """
-    import requests
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
-    import psutil
 
     # Track session creation for debugging
     logger.info(f"Creating new HTTP session (high_volume={use_high_volume})")
@@ -772,16 +1102,19 @@ def create_optimized_session(max_workers=None, use_high_volume=True):
 @dynamic_lru_cache
 def get_viirs_collection_cached(bounds_key, start_date, end_date, bands_key):
     """
-    Cached version of get_viirs_collection.
+    Cached version of get_viirs_collection with timeout protection.
+
+    Retrieves VIIRS nightlights data for a specified region and time period,
+    using caching to avoid redundant requests.
 
     Args:
-        bounds_key: String representation of bounds
-        start_date: Start date
-        end_date: End date
-        bands_key: String representation of bands
+        bounds_key: String representation of bounding box coordinates
+        start_date: Start date for the collection
+        end_date: End date for the collection
+        bands_key: String representation of bands to select
 
     Returns:
-        ee.ImageCollection
+        ee.ImageCollection: Filtered VIIRS image collection
     """
     # Convert string parameters back to original format
     bounds = [float(x) for x in bounds_key.split("_")]
@@ -810,7 +1143,6 @@ def get_viirs_collection_cached(bounds_key, start_date, end_date, bands_key):
 
     def get_collection_size_with_timeout(collection):
         import concurrent.futures
-        import time
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(collection.size().getInfo)
@@ -835,7 +1167,19 @@ def get_viirs_collection_optimized(
     bands: Optional[List[str]] = None,
 ) -> ee.ImageCollection:
     """
-    Optimized version of get_viirs_collection that uses caching.
+    Get VIIRS collection with caching optimization.
+
+    Converts parameters to cache-friendly string keys and uses the cached
+    function to retrieve VIIRS data efficiently.
+
+    Args:
+        grid_cell: GeoDataFrame containing the cell geometry
+        start_date: Start date in 'YYYY-MM-DD' format
+        end_date: End date in 'YYYY-MM-DD' format
+        bands: List of bands to select (usually ["avg_rad"])
+
+    Returns:
+        ee.ImageCollection: Filtered VIIRS image collection
     """
     # Convert grid cell to WGS84
     grid_cell_wgs84 = grid_cell.to_crs("EPSG:4326")
@@ -866,30 +1210,34 @@ def process_viirs_cell_optimized(
     progress_queue=None,
 ):
     """
-    Optimized version of process_viirs_cell.
+    Process a single VIIRS cell with comprehensive error handling.
+
+    Downloads, processes, and saves VIIRS nightlights data for a single grid cell,
+    with memory tracking and detailed failure logging.
 
     Args:
         idx: Index of the cell in the grid
-        cell: The cell data
+        cell: The cell data from the grid
         grid_gdf: Full grid GeoDataFrame
         country_name: Name of the country
         year: Year to process
         bands: List of bands to download
         composite_method: Method for compositing images
-        target_crs: Target CRS
-        output_dir: Output directory
+        target_crs: Target coordinate reference system
+        output_dir: Output directory for saving results
         session: Shared HTTP session
         failure_logger: Logger for recording failures
+        progress_queue: Queue for progress updates
 
     Returns:
-        Tuple of (cell_id, success_flag)
+        Tuple[int, bool]: Cell ID and success flag
     """
     cell_id = cell["cell_id"]
     cell_gdf = grid_gdf.iloc[[idx]]
     placeholder_file = None
 
     try:
-        # Check session age and refresh if needed
+        # Refresh session if older than 30 minutes
         if (
             hasattr(session, "_creation_time")
             and time.time() - session._creation_time > 1800
@@ -1017,19 +1365,22 @@ def download_viirs_data_optimized(
     """
     Download VIIRS nightlights data for a specific grid cell and year.
 
+    Retrieves, composites, and processes VIIRS data with robust retry logic
+    and comprehensive error handling.
+
     Args:
-        grid_cell: GeoDataFrame containing the grid cell
+        grid_cell: GeoDataFrame containing the grid cell geometry
         year: Year to process
-        cell_id: Cell identifier for logging
+        cell_id: Cell identifier for logging and tracking
         bands: List of bands to download (usually just ["avg_rad"])
         composite_method: Method for compositing images (median/mean)
-        target_crs: Target CRS for the output
+        target_crs: Target coordinate reference system
         session: HTTP session for downloading
         failure_logger: Logger for recording failures
         max_retries: Maximum number of retry attempts
 
     Returns:
-        Dictionary mapping band names to numpy arrays
+        Dict[str, np.ndarray]: Dictionary mapping band names to numpy arrays
     """
     try:
         # Generate date range for the entire year
@@ -1258,7 +1609,28 @@ def download_single_band(
     cell_id=None,
     max_retries=8,
 ):
-    """Download a single band with comprehensive retry logic including preparation phase."""
+    """
+    Download a single band with comprehensive retry logic.
+
+    Handles the entire process of creating a composite, generating a download URL,
+    retrieving the data, and converting to a numpy array, with robust error handling.
+
+    Args:
+        merged_collection: Earth Engine ImageCollection to process
+        band: Band name to download
+        composite_method: Method for compositing (median/mean)
+        region: Earth Engine geometry defining the region
+        width_meters: Width of the region in meters
+        height_meters: Height of the region in meters
+        target_crs: Target coordinate reference system
+        session: HTTP session for downloading
+        failure_logger: Logger for recording failures
+        cell_id: Cell identifier for logging
+        max_retries: Maximum number of retry attempts
+
+    Returns:
+        np.ndarray: Band data as numpy array, or None if download failed
+    """
     import tempfile
 
     viirs_resolution = 463.83  # meters per pixel
@@ -1355,7 +1727,7 @@ def download_single_band(
             # Read the GeoTIFF with rasterio
             with rasterio.open(tmp_path) as src:
                 band_array = src.read(1)
-                logger.info(f"Downloaded band {band} with shape {band_array.shape}")
+                logger.debug(f"Downloaded band {band} with shape {band_array.shape}")
 
                 # Verify we got reasonable data
                 if band_array.shape[0] < 5 or band_array.shape[1] < 5:
@@ -1438,7 +1810,10 @@ def save_viirs_band_arrays(
     target_crs: str,
 ) -> None:
     """
-    Process and save VIIRS band arrays.
+    Process and save VIIRS band arrays to disk.
+
+    Saves data in both GeoTIFF format (for geospatial integrity) and
+    optimized NPZ format (for efficient loading), then cleans up temporary files.
 
     Args:
         band_arrays: Dictionary mapping band names to numpy arrays
@@ -1446,8 +1821,8 @@ def save_viirs_band_arrays(
         country_name: Name of the country
         cell_id: ID of the grid cell
         year: Year of the data
-        grid_cell: The GeoDataFrame containing the cell geometry and CRS
-        target_crs: Target CRS to convert to before saving
+        grid_cell: GeoDataFrame containing the cell geometry
+        target_crs: Target coordinate reference system
     """
     if not band_arrays:
         logger.warning(
@@ -1534,6 +1909,9 @@ def save_viirs_cell_metadata(
     """
     Save comprehensive metadata for a processed VIIRS cell.
 
+    Creates a detailed JSON metadata file with spatial information, processing
+    parameters, array statistics, and normalization parameters.
+
     Args:
         country_name: Name of the country
         cell_id: ID of the grid cell
@@ -1542,7 +1920,7 @@ def save_viirs_cell_metadata(
         cell_gdf: GeoDataFrame containing the cell geometry
         output_dir: Base output directory
         composite_method: Method used for compositing
-        band_arrays: Dictionary of band arrays (for shape information)
+        band_arrays: Dictionary of band arrays
     """
     # Create output directory
     cell_dir = output_dir / country_name / str(year) / f"cell_{cell_id}"
@@ -1604,16 +1982,15 @@ def save_viirs_cell_metadata(
             }
             for name, arr in processed_data.items()
         },
-        ###TODO: make these more dynamic
         "normalization": {
             "nightlights": {
                 "log_min": 0,
-                "log_max": 4,
+                "log_max": 5,
                 "method": "log_transform_with_percentile_scaling",
             },
             "gradient": {
                 "min": 0,
-                "max": 50,
+                "max": 200,
                 "method": "global_min_max_scaling",
             },
         },
@@ -1636,14 +2013,28 @@ _OPTIMAL_CACHE_SIZE = 200
 
 
 def update_lru_cache_size(new_size):
-    """Update the global LRU cache size."""
+    """
+    Update the global LRU cache size.
+
+    Changes the size used by the dynamic_lru_cache decorator
+    for all subsequent cache operations.
+
+    Args:
+        new_size: New maximum size for the LRU cache
+    """
     global _OPTIMAL_CACHE_SIZE
     _OPTIMAL_CACHE_SIZE = new_size
     logger.info(f"Updated LRU cache size to {new_size}")
 
 
 def setup_request_counting():
-    """Set up request counting by monkey patching Earth Engine methods."""
+    """
+    Set up request counting by monkey patching Earth Engine methods.
+
+    Replaces key Earth Engine API methods with wrapped versions that
+    increment a counter each time they're called, enabling monitoring
+    of API usage and rate limiting.
+    """
     # Store original methods
     original_getInfo = ee.data.getInfo
     original_getList = ee.data.getList
@@ -1680,213 +2071,17 @@ def setup_request_counting():
     logger.info("Set up request counting for Earth Engine methods")
 
 
-def monitor_request_rate(stop_event):
-    """Monitor the actual request rate to Earth Engine with moving average."""
-    while not stop_event.is_set():
-        last_count = 0
-        last_time = time.time()
-        rate_history = []
-
-        try:
-            current_count = sum(request_counter.counts.values())
-            current_time = time.time()
-
-            elapsed = current_time - last_time
-            requests = current_count - last_count
-
-            if elapsed > 0:
-                current_rate = requests / elapsed * 60  # requests per minute
-                rate_history.append(current_rate)
-
-                # Keep only the last 5 measurements for moving average
-                if len(rate_history) > 5:
-                    rate_history.pop(0)
-
-                avg_rate = sum(rate_history) / len(rate_history)
-
-                # Calculate percentage of Earth Engine limit
-                limit_percentage = avg_rate / 6000 * 100
-
-                logger.info(
-                    f"Earth Engine request rate: {current_rate:.1f} req/min (avg: {avg_rate:.1f}, {limit_percentage:.1f}% of limit)"
-                )
-
-            last_count = current_count
-            last_time = current_time
-
-        except Exception as e:
-            logger.error(f"Error in request rate monitoring: {e}")
-
-        time.sleep(15)
-
-
-def monitor_and_recover_processing(stop_event):
-    """
-    Enhanced monitoring function with complete restart capability when stalled.
-    """
-    last_request_count = 0
-    last_active_time = time.time()
-    consecutive_stalls = 0
-    recovery_attempts = 0
-
-    # Keep track of when workers were last restarted
-    last_worker_restart = time.time()
-
-    while not stop_event.is_set():
-        try:
-            current_count = sum(request_counter.counts.values())
-            current_time = time.time()
-
-            # Monitor memory usage for leaks
-            process = psutil.Process(os.getpid())
-            current_memory = process.memory_info().rss / (1024 * 1024)
-
-            # Check if requests are being made
-            if current_count > last_request_count:
-                # Activity detected, reset stall counter
-                consecutive_stalls = 0
-                recovery_attempts = 0  # Reset recovery attempts on successful activity
-                last_active_time = current_time
-                last_request_count = current_count
-                logger.debug(
-                    f"Processing active: {current_count - last_request_count} new requests, "
-                    f"Memory: {current_memory:.1f} MB"
-                )
-            else:
-                # No new requests detected
-                elapsed = current_time - last_active_time
-                if elapsed > 120:  # 2 minutes of inactivity
-                    consecutive_stalls += 1
-                    logger.warning(
-                        f"Processing appears stalled for {elapsed:.1f} seconds (stall #{consecutive_stalls}), "
-                        f"Memory: {current_memory:.1f} MB"
-                    )
-
-                    # After multiple consecutive stalls, try recovery actions
-                    if consecutive_stalls >= 2:
-                        recovery_attempts += 1
-                        logger.error(
-                            f"Processing stalled for {consecutive_stalls} consecutive checks, "
-                            f"attempting recovery (attempt #{recovery_attempts})"
-                        )
-
-                        try:
-                            # Escalating recovery actions based on number of attempts
-                            if recovery_attempts == 1:
-                                # First attempt: basic recovery
-                                perform_basic_recovery()
-                            elif recovery_attempts == 2:
-                                # Second attempt: intermediate recovery
-                                perform_intermediate_recovery()
-                            else:
-                                # Third+ attempt: COMPLETE RESTART
-                                logger.critical(
-                                    "CRITICAL STALL DETECTED. Initiating full process restart!"
-                                )
-
-                                # Save command line arguments and restart the process
-                                python = sys.executable
-                                os.execl(python, python, *sys.argv)
-                                # This will completely restart the current Python process
-                                # No code after this point will execute in the current process
-
-                        except Exception as e:
-                            logger.error(f"Error during recovery: {e}")
-                            logger.exception("Recovery error details:")
-
-                        # Reset stall counter but not recovery attempts
-                        last_active_time = current_time
-                        consecutive_stalls = 0
-
-            # Periodic full reset regardless of stalls (every 2 hours)
-            if current_time - last_worker_restart > 7200:  # 2 hours
-                logger.info("Performing scheduled preventative recovery")
-                perform_intermediate_recovery()
-                last_worker_restart = current_time
-
-        except Exception as e:
-            logger.error(f"Error in monitoring thread: {e}")
-
-        time.sleep(30)  # Check every 30 seconds
-
-
-def perform_basic_recovery():
-    """Basic recovery actions for first stall detection."""
-    logger.info("Performing basic recovery actions")
-
-    # Force garbage collection
-    gc.collect(generation=2)
-
-    # Clear function caches
-    if hasattr(get_viirs_collection_cached, "cache_clear"):
-        get_viirs_collection_cached.cache_clear()
-
-    # Check for and kill any zombie threads
-    check_for_zombie_threads(timeout_seconds=300)  # 5 minutes
-
-
-def perform_intermediate_recovery():
-    """Intermediate recovery for repeated stalls."""
-    logger.info("Performing intermediate recovery actions")
-
-    # Do basic recovery first
-    perform_basic_recovery()
-
-    # Refresh Earth Engine session more aggressively
-    try:
-        logger.info("Refreshing Earth Engine session")
-        ee.Reset()
-        time.sleep(3)
-
-        ee.Initialize(
-            project="wealth-satellite-forecasting",
-            opt_url="https://earthengine-highvolume.googleapis.com",
-        )
-        setup_request_counting()
-    except Exception as e:
-        logger.error(f"Error refreshing Earth Engine: {e}")
-
-    # Create new global HTTP session
-    try:
-        logger.info("Creating new HTTP session with fresh connection pool")
-        global_session = create_optimized_session(max_workers=20, use_high_volume=True)
-
-        # Test the new session
-        test_response = global_session.get(
-            "https://earthengine.googleapis.com", timeout=10
-        )
-        logger.info(f"New session test response: {test_response.status_code}")
-    except Exception as e:
-        logger.error(f"Error creating new session: {e}")
-
-
-def check_for_zombie_threads(timeout_seconds=300):
-    """Check for and log any threads that have been running too long."""
-    current_time = time.time()
-    for thread in threading.enumerate():
-        # Skip daemon threads and main thread
-        if thread.daemon or thread.name == "MainThread":
-            continue
-
-        # Check if thread has thread-local start time
-        if (
-            hasattr(thread, "_start_time")
-            and current_time - thread._start_time > timeout_seconds
-        ):
-            logger.warning(
-                f"Potential zombie thread detected: {thread.name}, "
-                f"running for {current_time - thread._start_time:.1f} seconds"
-            )
-
-
 def cleanup_processing_files(output_dir, country_name, year):
     """
-    Clean up any leftover processing files from previous runs.
+    Clean up any leftover processing files from previous interrupted runs.
+
+    Finds and removes temporary processing marker files to ensure
+    cells can be properly reprocessed.
 
     Args:
         output_dir: Base output directory
         country_name: Name of the country
-        year: Year to process
+        year: Year being processed
     """
     logger.info(f"Cleaning up processing files for {country_name}, year {year}")
 
@@ -1937,9 +2132,19 @@ def cleanup_processing_files(output_dir, country_name, year):
 
 
 def measure_memory_usage(before=True, cell_id=None):
-    """Measure memory usage before/after processing a cell."""
-    import psutil
-    import os
+    """
+    Measure memory usage before and after processing a cell.
+
+    Uses thread-local storage to track memory usage across function calls,
+    enabling memory consumption analysis per cell.
+
+    Args:
+        before: If True, records starting memory; if False, calculates difference
+        cell_id: Cell ID for logging purposes
+
+    Returns:
+        float: Memory difference in MB if before=False, 0 otherwise
+    """
 
     process = psutil.Process(os.getpid())
     memory_info = process.memory_info()
@@ -1962,10 +2167,13 @@ def measure_memory_usage(before=True, cell_id=None):
 
 def estimate_memory_per_worker(sample_size=3):
     """
-    Estimate memory usage per worker by processing a few sample cells.
+    Estimate memory usage per worker by processing sample cells.
+
+    Runs simplified processing on sample data to determine appropriate
+    memory allocation for worker threads.
 
     Args:
-        sample_size: Number of cells to sample
+        sample_size: Number of sample cells to process
 
     Returns:
         float: Estimated memory usage per worker in GB
@@ -2013,9 +2221,17 @@ def estimate_memory_per_worker(sample_size=3):
 
 def calculate_optimal_workers(config):
     """
-    Calculate the optimal number of worker threads based on system resources and EE limits.
+    Calculate the optimal number of worker threads based on system resources.
+
+    Determines worker count by considering CPU cores, memory availability,
+    Earth Engine rate limits, and network constraints.
+
+    Args:
+        config: Configuration dictionary
+
+    Returns:
+        int: Optimal number of worker threads
     """
-    import psutil
 
     # Get configured max workers
     configured_max = config.get("max_workers", None)
@@ -2101,12 +2317,14 @@ def calculate_optimal_workers(config):
 
 def calculate_optimal_cache_size():
     """
-    Calculate optimal LRU cache size based on available memory and measured collection size.
+    Calculate optimal LRU cache size based on available memory.
+
+    Determines how many Earth Engine collections can be cached based on
+    available memory and measured memory usage per cached collection.
 
     Returns:
-        int: Optimal cache size
+        int: Optimal LRU cache size (number of items)
     """
-    import psutil
 
     # Get available memory in GB
     available_memory_gb = psutil.virtual_memory().available / (1024**3)
@@ -2137,16 +2355,15 @@ def measure_collection_memory_usage(sample_size=5):
     """
     Measure the actual memory usage of cached Earth Engine collections.
 
+    Creates sample Earth Engine collections and measures their memory usage
+    to calculate optimal cache size.
+
     Args:
         sample_size: Number of collections to sample
 
     Returns:
         float: Average memory usage per collection in MB
     """
-    import gc
-    import psutil
-    import random
-    import sys
 
     logger.info("Measuring memory usage of cached Earth Engine collections...")
 
@@ -2248,10 +2465,12 @@ def measure_collection_memory_usage(sample_size=5):
 def process_sample_cell():
     """
     Process a sample cell to estimate memory usage.
-    Creates a small Earth Engine collection and performs typical operations.
+
+    Creates a small Earth Engine collection and performs typical operations
+    to simulate actual processing for memory estimation purposes.
 
     Returns:
-        dict: Sample results
+        dict: Sample results with count and statistics
     """
     import random
 
@@ -2292,6 +2511,9 @@ def save_value_statistics(output_dir: Path, country_name: str, year: int):
     """
     Save value statistics to a JSON file for future reference.
 
+    Persists the min, max, and average values collected by the ValueTracker
+    for use in normalization and analysis.
+
     Args:
         output_dir: Base output directory
         country_name: Name of the country
@@ -2320,7 +2542,10 @@ def save_value_statistics(output_dir: Path, country_name: str, year: int):
 
 def progress_updater_thread(queue, total, desc, stop_event):
     """
-    Thread function to handle progress bar updates from a queue at a consistent rate.
+    Handle progress bar updates from a queue at a consistent rate.
+
+    Runs as a background thread to batch progress updates and display
+    a smooth progress bar during parallel processing.
 
     Args:
         queue: Queue containing progress update increments
