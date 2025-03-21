@@ -1,0 +1,10 @@
+geopandas
+joblib
+matplotlib
+numpy
+pandas
+psutil
+PyYAML
+setuptools
+Shapely
+tqdm

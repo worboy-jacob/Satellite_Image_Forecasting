@@ -3,3 +3,4 @@ data/Results/SatelliteImageData/
 *.DS_Store
 *.log
 Code/SatelliteImages/logs/
+__pycache__/

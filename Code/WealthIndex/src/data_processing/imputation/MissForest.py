@@ -1,3 +1,12 @@
+"""
+Random Forest based imputation (MissForest) implementation.
+
+Provides an implementation of the MissForest algorithm for handling missing data
+through iterative Random Forest models. Each variable with missing values is modeled
+using Random Forest regression (for numeric variables) or classification (for categorical
+variables) based on observed values in other variables.
+"""
+
 from src.data_processing.imputation.base_imputer import BaseImputer
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 import numpy as np
@@ -17,17 +26,39 @@ for handler in logger.handlers:
 
 
 class MissForestImputer(BaseImputer):
-    """Random Forest based imputation implementation."""
+    """
+    Random Forest based imputation implementation.
+
+    Implements the MissForest algorithm which handles missing data by training
+    Random Forest models on observed values to predict missing values. The process
+    iterates until convergence, using regression forests for numeric variables
+    and classification forests for categorical variables.
+    """
 
     def _generate_parameter_combinations(
         self, n_samples: int, column_type: str, missing_pct: float, column_name: str
     ) -> List[Dict]:
-        """Generate parameter combinations for MissForest imputation."""
+        """
+        Generate parameter combinations for MissForest imputation.
+
+        Creates parameter sets based on data characteristics such as sample size,
+        column type, and missing percentage, focusing on key Random Forest parameters
+        like number of trees, tree depth, and feature selection methods.
+
+        Args:
+            n_samples: Number of samples in the dataset
+            column_type: Type of the column ('numeric' or 'categorical')
+            missing_pct: Percentage of missing values
+            column_name: Name of the column for logging
+
+        Returns:
+            List of parameter dictionaries for evaluation
+        """
         logger.info(
             f"Generating parameters for {column_name} ({column_type}, {missing_pct:.4f}% missing)"
         )
 
-        # Determine n_iterations values based on missing percentage
+        # Scale iterations with missing data complexity
         if missing_pct < 10:
             n_iterations_values = [3, 5]
         elif missing_pct < 30:
@@ -35,13 +66,13 @@ class MissForestImputer(BaseImputer):
         else:
             n_iterations_values = [5, 7, 10]
 
-        # Determine n_estimators values based on sample size and missing percentage
+        # Adjust tree count based on dataset size
         if n_samples < 1000:
             n_estimators_values = [50, 100]
         else:
             n_estimators_values = [100, 200]
 
-        # Determine max_features values - one of the most impactful parameters
+        # Feature selection strategies - one of the most impactful parameters
         max_features_values = ["sqrt", "log2", None]  # None means all features
 
         # Determine max_depth - another impactful parameter
@@ -88,8 +119,20 @@ class MissForestImputer(BaseImputer):
         rf_model: Union[RandomForestClassifier, RandomForestRegressor],
     ) -> float:
         """
-        Calculate secondary score for tie-breaking.
-        Returns a score between 0 and 1 (lower is better).
+        Calculate secondary score for tie-breaking parameter sets.
+
+        Evaluates parameter configurations based on model confidence and
+        complexity when multiple configurations have similar imputation quality.
+        Lower scores are better, with values between 0 and 1.
+
+        Args:
+            df: DataFrame containing the data
+            target_column: Column being imputed
+            params: Parameter configuration to evaluate
+            rf_model: The initialized Random Forest model
+
+        Returns:
+            Float score between 0 and 1 (lower is better)
         """
         # Calculate prediction confidence if available
         confidence_score = 0.5  # Default neutral score
@@ -106,7 +149,7 @@ class MissForestImputer(BaseImputer):
                 # Determine if we're dealing with classification or regression
                 is_classifier = hasattr(rf_model, "predict_proba")
 
-                # Sample data for efficiency (with stratification for classification)
+                # Sample data for efficiency while preserving distribution
                 sample_size = min(1000, len(X_observed))
                 if sample_size < len(X_observed):
                     if is_classifier:
@@ -141,6 +184,7 @@ class MissForestImputer(BaseImputer):
                 # Fit model and calculate confidence
                 rf_model.fit(X_sample, y_sample)
 
+                # Calculate model quality score based on available metrics
                 if is_classifier:
                     # For classification, use prediction probabilities
                     probas = rf_model.predict_proba(X_sample)
@@ -205,7 +249,20 @@ class MissForestImputer(BaseImputer):
     def _get_forest_model(
         self, is_numeric: bool, params: Dict[str, Any]
     ) -> Union[RandomForestRegressor, RandomForestClassifier]:
-        """Get the appropriate forest model based on column type and parameters."""
+        """
+        Get the appropriate Random Forest model based on column type.
+
+        Creates and configures either a RandomForestRegressor for numeric columns
+        or a RandomForestClassifier for categorical columns, applying the
+        specified parameters.
+
+        Args:
+            is_numeric: Whether the column contains numeric data
+            params: Parameters for configuring the forest model
+
+        Returns:
+            Configured RandomForest model ready for fitting
+        """
         forest_params = {
             "n_estimators": params["n_estimators"],
             "max_depth": params["max_depth"],
@@ -228,6 +285,19 @@ class MissForestImputer(BaseImputer):
     def _get_imputer(
         self, series: pd.Series, params
     ) -> Union[RandomForestRegressor, RandomForestClassifier]:
+        """
+        Get the appropriate Random Forest imputer for a series.
+
+        Determines the column type and delegates to _get_forest_model to create
+        the appropriate model with the given parameters.
+
+        Args:
+            series: The series to be imputed
+            params: Parameters for the Random Forest model
+
+        Returns:
+            Configured RandomForest model for the given data type
+        """
         is_numeric_target = self.determine_column_type(series) == "numeric"
         return self._get_forest_model(is_numeric_target, params)
 
@@ -238,7 +308,22 @@ class MissForestImputer(BaseImputer):
         params: Dict[str, Any],
         country_year: str,
     ) -> pd.Series:
-        """Perform MissForest imputation for a single column."""
+        """
+        Perform MissForest imputation for a single column.
+
+        Implements the iterative Random Forest imputation process for one column,
+        using other columns as predictors and iterating until convergence or
+        maximum iterations is reached.
+
+        Args:
+            df: DataFrame containing the data
+            target_column: Column to impute
+            params: Parameters for the imputation process
+            country_year: Country-year identifier for logging
+
+        Returns:
+            Series with imputed values
+        """
         start_time = time()
 
         # Initialize encoders
@@ -293,7 +378,7 @@ class MissForestImputer(BaseImputer):
             else:
                 has_encoder = False
 
-        # Initialize missing values
+        # Initialize missing values with statistical estimates
         current_imp = df[target_column].copy()
         if is_numeric_target:
             current_series = pd.to_numeric(current_imp, errors="raise")
@@ -308,7 +393,7 @@ class MissForestImputer(BaseImputer):
 
         df_working[target_column] = current_imp
 
-        # Iteration loop
+        # Iterative imputation process
         for iteration in range(params["n_iterations"]):
             previous_imp = current_imp.copy()
 
@@ -354,7 +439,7 @@ class MissForestImputer(BaseImputer):
             # Update working dataframe
             df_working[target_column] = current_imp
 
-            # Check convergence
+            # Check convergence to determine if we can stop early
             has_converged, conv_metric = self._check_convergence(
                 current_imp, previous_imp, missing_mask, iteration
             )
@@ -377,7 +462,22 @@ class MissForestImputer(BaseImputer):
         return final_imputation
 
     def impute(self, df: pd.DataFrame, country_year: str) -> Tuple[pd.DataFrame, float]:
-        """Perform MissForest imputation on the entire dataset."""
+        """
+        Perform MissForest imputation on the entire dataset.
+
+        Orchestrates the complete MissForest imputation workflow for all columns
+        with missing values, handling special cases and delegating to the
+        common imputation workflow.
+
+        Args:
+            df: DataFrame with missing values to impute
+            country_year: String identifier for the country and year
+
+        Returns:
+            Tuple containing:
+            - DataFrame with imputed values
+            - Overall imputation quality score
+        """
         logger.info(f"Imputing missing values with MissForest for {country_year}")
         for col in df.columns:
             unique_values = df[col].dropna().unique()

@@ -1,18 +1,30 @@
-# setup.py
 from setuptools import setup, find_packages
 
 setup(
-    name="wealth_index",
+    name="WealthIndex",
     version="0.1.0",
-    packages=find_packages(),
+    description="Package for WealthIndex",
+    packages=find_packages(where="src"),
+    package_dir={"": "src"},
     install_requires=[
-        "pandas",
-        "numpy",
-        "scikit-learn",
-        "prince",
-        "pyyaml",
+        "joblib",
         "matplotlib",
+        "numpy",
+        "pandas",
+        "prince",
+        "psutil",
+        "PyYAML",
+        "scikit_learn",
+        "scipy",
+        "seaborn",
+        "setuptools",
         "tqdm",
-        "pyarrow",
     ],
+    package_data={"": ["d:\satellite\Code\WealthIndex\config\config.yaml"]},
+    entry_points={
+        "console_scripts": [
+            "WealthIndex=main:main",
+        ],
+    },
+    python_requires=">=3.12",
 )

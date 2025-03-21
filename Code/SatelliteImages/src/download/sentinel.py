@@ -1,53 +1,40 @@
-###TODO: create overall stich
-###TODO: add validation
+"""Download all the sentinel data and save it after processing for every grid cell.
+Includes two different possible collections as each is missing some data."""
+
 import concurrent.futures
 import time
 import gc
 import os
-import tempfile
-from functools import lru_cache
-import hashlib
 import ee
 import numpy as np
-import pandas as pd
 import geopandas as gpd
 import logging
 from pathlib import Path
-from datetime import datetime, timedelta
-import time
+from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
 import rasterio
 from rasterio.transform import from_origin
 import calendar
-import multiprocessing
 from tqdm import tqdm
-from joblib import Parallel, delayed
 import sys
-from src.utils.paths import get_data_dir, get_results_dir
+from src.utils.paths import get_results_dir
 import threading
-import psutil
 import functools
-import requests
-from urllib3.util.retry import Retry
-from functools import lru_cache
-import hashlib
 import psutil
-import gc
 from src.processing.resampling import (
-    resample_to_256x256,
     process_and_save_bands,
     cleanup_original_files,
 )
 import json
 import traceback
 import random
-import queue
 from queue import Queue, Empty
 
 logger = logging.getLogger("image_processing")
 for handler in logger.handlers:
     handler.flush = sys.stdout.flush
 
+# Specific band resolutions for image processing
 BAND_RESOLUTION = {
     # 10m bands
     "B2": 10,
@@ -81,9 +68,19 @@ class FailureLogger:
         self.lock = threading.Lock()
 
     def log_failure(self, cell_id, error_type, error_message, details=None):
-        """Log a failure to the persistent file."""
+        """log_failure Log a failure to the persistent file.
+
+        Args:
+            cell_id: The cell that failed
+            error_type: What type of error
+            error_message: Message of the error
+            details: Details of the error in a dictionary. Defaults to None.
+
+        Returns:
+            Dict: A record of the failure information
+        """
         with self.lock:
-            failure_record = {
+            failure_record = {  # Dictionary structure
                 "timestamp": datetime.now().isoformat(),
                 "country": self.country_name,
                 "year": self.year,
@@ -163,8 +160,254 @@ class RequestCounter:
             return f"Cells: {len(self.counts)}, Total: {sum(self.counts.values())}, Avg: {self.get_average():.2f}, Max: {max(self.counts.values())}"
 
 
-# Create a global request counter
+# Global request counter for tracking
 request_counter = RequestCounter()
+
+
+class ProcessingMonitor:
+    """
+    Monitors processing and handles recovery operations for Earth Engine processing.
+
+    Provides monitoring of request rates, detects stalled processes, and implements
+    various levels of recovery actions to keep processing running smoothly.
+    """
+
+    def __init__(self):
+        """Initialize the ProcessingMonitor."""
+        self.last_request_count = 0
+        self.last_active_time = time.time()
+        self.consecutive_stalls = 0
+        self.recovery_attempts = 0
+        self.last_worker_restart = time.time()
+        self.rate_history = []
+
+    def monitor_request_rate(self, stop_event):
+        """
+        Monitor the request rate to Earth Engine with moving average.
+
+        Runs as a background thread to track Earth Engine API requests per minute,
+        maintaining a moving average and reporting the percentage of rate limit used.
+
+        Args:
+            stop_event: Threading event to signal when monitoring should stop
+        """
+        self.last_count = 0
+        self.last_time = time.time()
+        self.rate_history = []
+
+        while not stop_event.is_set():
+            try:
+                current_count = sum(request_counter.counts.values())
+                current_time = time.time()
+
+                elapsed = current_time - self.last_time
+                requests = current_count - self.last_count
+
+                if elapsed > 0:
+                    current_rate = requests / elapsed * 60  # requests per minute
+                    self.rate_history.append(current_rate)
+
+                    # Keep only the last 5 measurements for moving average
+                    if len(self.rate_history) > 5:
+                        self.rate_history.pop(0)
+
+                    avg_rate = sum(self.rate_history) / len(self.rate_history)
+
+                    # Calculate percentage of Earth Engine limit
+                    limit_percentage = avg_rate / 6000 * 100
+
+                    logger.info(
+                        f"Earth Engine request rate: {current_rate:.1f} req/min (avg: {avg_rate:.1f}, {limit_percentage:.1f}% of limit)"
+                    )
+
+                self.last_count = current_count
+                self.last_time = current_time
+
+            except Exception as e:
+                logger.error(f"Error in request rate monitoring: {e}")
+
+            time.sleep(15)
+
+    def monitor_and_recover_processing(self, stop_event):
+        """
+        Monitor processing and perform recovery actions when stalled.
+
+        Runs as a background thread to detect processing stalls and implement
+        escalating recovery actions, including process restart if necessary.
+
+        Args:
+            stop_event: Threading event to signal when monitoring should stop
+        """
+        self.last_request_count = 0
+        self.last_active_time = time.time()
+        self.consecutive_stalls = 0
+        self.recovery_attempts = 0
+        self.last_worker_restart = time.time()
+
+        while not stop_event.is_set():
+            try:
+                current_count = sum(request_counter.counts.values())
+                current_time = time.time()
+
+                # Monitor memory usage for leaks
+                process = psutil.Process(os.getpid())
+                current_memory = process.memory_info().rss / (1024 * 1024)
+
+                # Check if requests are being made
+                if current_count > self.last_request_count:
+                    # Activity detected, reset stall counter
+                    self.consecutive_stalls = 0
+                    self.recovery_attempts = (
+                        0  # Reset recovery attempts on successful activity
+                    )
+                    self.last_active_time = current_time
+                    self.last_request_count = current_count
+                    logger.debug(
+                        f"Processing active: {current_count - self.last_request_count} new requests, "
+                        f"Memory: {current_memory:.1f} MB"
+                    )
+                else:
+                    # No new requests detected
+                    elapsed = current_time - self.last_active_time
+                    if elapsed > 120:  # 2 minutes of inactivity
+                        self.consecutive_stalls += 1
+                        logger.warning(
+                            f"Processing appears stalled for {elapsed:.1f} seconds (stall #{self.consecutive_stalls}), "
+                            f"Memory: {current_memory:.1f} MB"
+                        )
+
+                        # After multiple consecutive stalls, try recovery actions
+                        if self.consecutive_stalls >= 2:
+                            self.recovery_attempts += 1
+                            logger.error(
+                                f"Processing stalled for {self.consecutive_stalls} consecutive checks, "
+                                f"attempting recovery (attempt #{self.recovery_attempts})"
+                            )
+
+                            try:
+                                # Escalating recovery actions based on number of attempts
+                                if self.recovery_attempts == 1:
+                                    # First attempt: basic recovery
+                                    self.perform_basic_recovery()
+                                elif self.recovery_attempts == 2:
+                                    # Second attempt: intermediate recovery
+                                    self.perform_intermediate_recovery()
+                                else:
+                                    # Third+ attempt: COMPLETE RESTART
+                                    logger.critical(
+                                        "CRITICAL STALL DETECTED. Initiating full process restart!"
+                                    )
+
+                                    # Save command line arguments and restart the process
+                                    python = sys.executable
+                                    os.execl(python, python, *sys.argv)
+                                    # This will completely restart the current Python process
+                                    # No code after this point will execute in the current process
+
+                            except Exception as e:
+                                logger.error(f"Error during recovery: {e}")
+                                logger.exception("Recovery error details:")
+
+                            # Reset stall counter but not recovery attempts
+                            self.last_active_time = current_time
+                            self.consecutive_stalls = 0
+
+                # Periodic full reset regardless of stalls (every 2 hours)
+                if current_time - self.last_worker_restart > 7200:  # 2 hours
+                    logger.info("Performing scheduled preventative recovery")
+                    self.perform_intermediate_recovery()
+                    self.last_worker_restart = current_time
+
+            except Exception as e:
+                logger.error(f"Error in monitoring thread: {e}")
+
+            time.sleep(30)  # Check every 30 seconds
+
+    def perform_basic_recovery(self):
+        """
+        Perform basic recovery actions for first-level stall detection.
+
+        Implements lightweight recovery actions including garbage collection,
+        cache clearing, and checking for zombie threads.
+        """
+        logger.info("Performing basic recovery actions")
+
+        # Force garbage collection
+        gc.collect(generation=2)
+
+        # Clear function caches
+        if hasattr(get_sentinel_collection_cached, "cache_clear"):
+            get_sentinel_collection_cached.cache_clear()
+
+        # Check for and kill any zombie threads
+        self.check_for_zombie_threads(timeout_seconds=300)  # 5 minutes
+
+    def perform_intermediate_recovery(self):
+        """
+        Perform intermediate recovery for repeated stalls.
+
+        Implements more aggressive recovery including basic recovery actions
+        plus Earth Engine session refresh and HTTP session replacement.
+        """
+        logger.info("Performing intermediate recovery actions")
+
+        # Do basic recovery first
+        self.perform_basic_recovery()
+
+        # Refresh Earth Engine session more aggressively
+        try:
+            logger.info("Refreshing Earth Engine session")
+            ee.Reset()
+            time.sleep(3)
+
+            ee.Initialize(
+                project="wealth-satellite-forecasting",
+                opt_url="https://earthengine-highvolume.googleapis.com",
+            )
+            setup_request_counting()
+        except Exception as e:
+            logger.error(f"Error refreshing Earth Engine: {e}")
+
+        # Create new global HTTP session
+        try:
+            logger.info("Creating new HTTP session with fresh connection pool")
+            global_session = create_optimized_session(
+                max_workers=20, use_high_volume=True
+            )
+
+            # Test the new session
+            test_response = global_session.get(
+                "https://earthengine.googleapis.com", timeout=10
+            )
+            logger.info(f"New session test response: {test_response.status_code}")
+        except Exception as e:
+            logger.error(f"Error creating new session: {e}")
+
+    def check_for_zombie_threads(self, timeout_seconds=300):
+        """
+        Check for and log any threads that have been running too long.
+
+        Identifies non-daemon threads that have been running longer than
+        the specified timeout and logs them as potential zombies.
+
+        Args:
+            timeout_seconds: Thread age threshold in seconds (default: 300)
+        """
+        current_time = time.time()
+        for thread in threading.enumerate():
+            # Skip daemon threads and main thread
+            if thread.daemon or thread.name == "MainThread":
+                continue
+
+            # Check if thread has thread-local start time
+            if (
+                hasattr(thread, "_start_time")
+                and current_time - thread._start_time > timeout_seconds
+            ):
+                logger.warning(
+                    f"Potential zombie thread detected: {thread.name}, "
+                    f"running for {current_time - thread._start_time:.1f} seconds"
+                )
 
 
 def initialize_earth_engine(config):
@@ -180,7 +423,6 @@ def initialize_earth_engine(config):
     # Check if high-volume endpoint should be used
     use_high_volume = config.get("use_high_volume_endpoint", True)
 
-    # Add timeout handling
     try:
 
         if use_high_volume:
@@ -227,10 +469,9 @@ def initialize_earth_engine(config):
 # Modified decorator that uses the global size
 def dynamic_lru_cache(func):
     """LRU cache decorator that uses the global cache size."""
-    # This is a wrapper around the standard lru_cache
-    # that reads the global size variable
+    # This is a wrapper around the standard lru_cache that reads the global size variable
 
-    # The actual cached function will be stored here
+    # The actual cached function will be stored here for quicker processing with the cached function
     cached_func = None
 
     @functools.wraps(func)
@@ -240,8 +481,7 @@ def dynamic_lru_cache(func):
         # Get the current global cache size
         current_size = _OPTIMAL_CACHE_SIZE
 
-        # If the cached function doesn't exist or the size has changed,
-        # create/recreate it with the current size
+        # If the cached function doesn't exist or the size has changed create/recreate it with the current size
         if cached_func is None:
             cached_func = functools.lru_cache(maxsize=current_size)(func)
 
@@ -259,25 +499,39 @@ def dynamic_lru_cache(func):
 def download_sentinel_for_country_year(
     config: Dict[str, Any], country_name: str, year: int, grid_gdf: gpd.GeoDataFrame
 ) -> None:
+    """download_sentinel_for_country_year Download Sentinel-2 data for all cells of a specific country-year pair using optimized parallel processing.
+
+    Args:
+        config: Configuration dictionary
+        country_name: Name of the country being processed
+        year: Year being processed
+        grid_gdf: The grid that needs to be filled with images, usually a full grid of the country but may be a subset in repairs.
+
+    Returns:
+        Nothing
     """
-    Download Sentinel-2 data for all cells of a specific country-year pair using optimized parallel processing.
-    """
-    # Filter out cells that have already been processed
-    # Get the output directory
+    # Creating the ability to stop the monitor and recovery functions for when it is called from repair_failures
     monitor_stop_event = threading.Event()
     recovery_stop_event = threading.Event()
+
     monitoring_threads = []
     recovery_threads = []
+
+    # Setting up output directory
     output_dir = get_results_dir() / "Images" / "Sentinel"
     cells_to_process = []
+
+    # Creating metadata paths and cell paths for all of the cells in the grid
     for idx, cell in grid_gdf.iterrows():
         cell_id = cell["cell_id"]
         cell_dir = output_dir / country_name / str(year) / f"cell_{cell_id}"
         metadata_file = cell_dir / "metadata.json"
 
+        # Only process cells that haven't been created yet
         if not metadata_file.exists():
             cells_to_process.append((idx, cell))
 
+    # Exit early if nothing to process
     if not cells_to_process:
         logger.info(
             f"All Sentinel-2 cells for {country_name}, year {year} have already been processed"
@@ -288,10 +542,12 @@ def download_sentinel_for_country_year(
     failure_logger = FailureLogger(output_dir, country_name, year)
 
     try:
-        # Start the monitoring threads
 
+        # Creating a queue for smoothing pbar updating
         progress_queue = Queue()
+        # Ability to stop the progress queue if called from repair_failures.py
         progress_thread_stop = threading.Event()
+        # Threading the queue for updating throughout
         progress_thread = threading.Thread(
             target=progress_updater_thread,
             args=(
@@ -303,30 +559,35 @@ def download_sentinel_for_country_year(
             daemon=True,
         )
         progress_thread.start()
+
+        # Threading the monitor function to keep track of requests
+        processing_monitor = ProcessingMonitor()
         monitor_thread = threading.Thread(
-            target=monitor_request_rate, args=(monitor_stop_event,), daemon=True
+            target=processing_monitor.monitor_request_rate,
+            args=(monitor_stop_event,),
+            daemon=True,
         )
         monitor_thread.start()
         monitoring_threads.append(monitor_thread)
 
+        # Threading the recovery function to recover when needed
         recovery_thread = threading.Thread(
-            target=monitor_and_recover_processing,
+            target=processing_monitor.monitor_and_recover_processing,
             args=(recovery_stop_event,),
             daemon=True,
         )
         recovery_thread.start()
         recovery_threads.append(recovery_thread)
-
         # Initialize Earth Engine with appropriate endpoint
         initialize_earth_engine(config)
-        early_year = False
+        early_year = False  # Early year used as certain data is more certain for what collection needs to be used
         if year < 2017:
             early_year = True
 
         # Check if using high-volume endpoint
         use_high_volume = config.get("use_high_volume_endpoint", True)
 
-        # Clean up any leftover processing files
+        # Clean up any leftover processing files from previous runs
         cleanup_processing_files(output_dir, country_name, year)
 
         # Get country CRS from config
@@ -359,7 +620,7 @@ def download_sentinel_for_country_year(
         # Calculate optimal number of workers
         max_workers = calculate_optimal_workers(config)
 
-        # Set optimal LRU cache size
+        # Set optimal LRU cache size for wrapper of cache
         optimal_cache_size = calculate_optimal_cache_size(early_year=early_year)
         update_lru_cache_size(optimal_cache_size)
 
@@ -387,18 +648,17 @@ def download_sentinel_for_country_year(
             10, int((available_memory_gb * 0.9) / memory_per_cell_gb)
         )
 
-        # Cap batch size at a reasonable maximum
+        # Cap batch size
         batch_size = min(memory_based_batch_size, 500, len(cells_to_process))
 
         logger.info(
             f"Processing cells in batches of {batch_size} (memory-based calculation)"
         )
 
-        # Variables to track request count for session refresh
+        # Variables to track request count for session recovery
         last_request_count = sum(request_counter.counts.values())
         last_active_time = time.time()
 
-        # Process in batches to avoid overwhelming memory
         for batch_start in range(0, len(cells_to_process), batch_size):
             batch_end = min(batch_start + batch_size, len(cells_to_process))
             current_batch = cells_to_process[batch_start:batch_end]
@@ -408,7 +668,7 @@ def download_sentinel_for_country_year(
                 f"({len(current_batch)} cells)"
             )
 
-            # Process batch with retry mechanism (simplified)
+            # Process batch with retry mechanism
             batch_success = False
             for batch_attempt in range(5):
                 if batch_attempt > 0:
@@ -420,13 +680,12 @@ def download_sentinel_for_country_year(
                     gc.collect()
 
                 try:
-                    # Use a ThreadPoolExecutor for better control over concurrency
                     with concurrent.futures.ThreadPoolExecutor(
                         max_workers=max_workers
                     ) as executor:
                         batch_timeout = time.time() + (
                             360 * len(current_batch) / max_workers
-                        )
+                        )  # Setting timeout to end the batch in case of any issues
                         # Submit all tasks
                         future_to_cell = {
                             executor.submit(
@@ -461,7 +720,7 @@ def download_sentinel_for_country_year(
                                 break
                             try:
                                 cell_id, success = future.result(
-                                    timeout=360  # Increased from 300 to 360 seconds
+                                    timeout=360  # Timeout of the batch
                                 )
                                 progress_queue.put(1)
 
@@ -495,7 +754,6 @@ def download_sentinel_for_country_year(
                                 )
                                 progress_queue.put(1)
 
-                    # If we get here, batch completed successfully
                     batch_success = True
                     break
 
@@ -505,10 +763,8 @@ def download_sentinel_for_country_year(
                     )
                     logger.error(error_msg)
 
-                    if batch_attempt < 4:  # Try up to 5 times (0-4)
-                        delay = (
-                            batch_attempt + 1
-                        ) * 45  # Increased from 30 to 45 seconds
+                    if batch_attempt < 4:  # Retry mechanism
+                        delay = (batch_attempt + 1) * 45  # Exponential delay increasing
                         logger.info(f"Retrying batch in {delay} seconds...")
                         time.sleep(delay)
 
@@ -529,11 +785,9 @@ def download_sentinel_for_country_year(
                         "batch_end": batch_end,
                     },
                 )
-
-            # Force garbage collection between batches
             gc.collect()
 
-            # Only refresh session if we've seen signs of problems
+            # Refreshing the session due to an issue and batch failure
             current_request_count = sum(request_counter.counts.values())
             if (
                 current_request_count == last_request_count
@@ -548,6 +802,8 @@ def download_sentinel_for_country_year(
             last_request_count = current_request_count
             if current_request_count > last_request_count:
                 last_active_time = time.time()
+
+        # Ensuring threads stop and don't leak
         progress_thread_stop.set()
         progress_thread.join(timeout=5)
         monitor_stop_event.set()
@@ -556,7 +812,7 @@ def download_sentinel_for_country_year(
         failure_summary = failure_logger.get_failure_summary()
         logger.info(f"Failure summary: {failure_summary}")
         logger.info(f"Completed processing for {country_name}, year {year}")
-        return  # Explicit return to exit function
+        return  # Explicit return to prevent leakage
     except Exception as e:
         error_msg = f"Critical error in download_sentinel_for_country_year: {str(e)}"
         logger.error(error_msg)
@@ -565,6 +821,8 @@ def download_sentinel_for_country_year(
         failure_logger.log_failure(
             "global", "critical_error", str(e), {"country": country_name, "year": year}
         )
+
+        # Forcing the events to stop
         monitor_stop_event.set()
         recovery_stop_event.set()
         if "progress_thread_stop" in locals():
@@ -576,14 +834,20 @@ def download_sentinel_for_country_year(
 
 
 def create_optimized_session(max_workers=None, use_high_volume=True):
-    """
-    Create an optimized requests session with connection pooling and tracking.
+    """create_optimized_session Create an optimized requests session with connection pooling and tracking.
+
+    Args:
+        max_workers: Number of workers for processing. Defaults to None.
+        use_high_volume: Which endpoint to use. Defaults to True.
+
+    Returns:
+        request session: session used to create links and download from earth engine
     """
     import requests
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
-    import psutil
 
+    # Close previously opened sessions
     if "global_session" in globals() and "global_session" in globals():
         try:
             globals()["global_session"].close()
@@ -623,7 +887,7 @@ def create_optimized_session(max_workers=None, use_high_volume=True):
         cpu_count = psutil.cpu_count(logical=True)
         max_workers = cpu_count * 2
 
-    # More conservative pool sizes to prevent exhaustion
+    # Setting pool size
     pool_connections = min(max(30, max_workers), 100)
     pool_maxsize = min(max(60, max_workers * 3), 200)
 
@@ -656,19 +920,18 @@ def create_optimized_session(max_workers=None, use_high_volume=True):
 def get_sentinel_collection_cached(
     bounds_key, start_date, end_date, cloud_threshold, bands_key, early_year
 ):
-    """
-    Cached version of get_sentinel_collection.
+    """get_sentinel_collection_cached Cached version of get_sentinel_collection.
 
     Args:
-        bounds_key: String representation of bounds
-        start_date: Start date
-        end_date: End date
-        cloud_threshold: Cloud threshold
-        bands_key: String representation of bands
-        early_year: Whether to use early year collection
+        bounds_key: keys to the bounds of the country
+        start_date: start date to get the collection
+        end_date: end date to get the collection
+        cloud_threshold: cut off for cloudy percentage
+        bands_key: keys to all the bands to be downloaded
+        early_year: Whether to use early year collection or not
 
     Returns:
-        ee.ImageCollection
+        ee.ImageCollection: a collection of ee images filtered by date, location, bands and cloud
     """
     # Convert string parameters back to original format
     bounds = [float(x) for x in bounds_key.split("_")]
@@ -688,7 +951,7 @@ def get_sentinel_collection_cached(
         # Filter by cloud cover - using CLOUD_COVERAGE for early years
         collection = collection.filter(ee.Filter.lt("CLOUD_COVERAGE", cloud_threshold))
 
-        # Define cloud masking function for early years using Fmask
+        # Define cloud masking function for early years using Fmask for HLS
         def mask_hls_clouds(image):
             fmask = image.select("Fmask")
             # Mask out pixels where:
@@ -703,7 +966,7 @@ def get_sentinel_collection_cached(
             )
             return image.updateMask(mask)
 
-        # Apply cloud masking for early years
+        # Apply cloud masking for early years to null cloudy pixels
         collection = collection.map(mask_hls_clouds)
     else:
         collection = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
@@ -717,7 +980,7 @@ def get_sentinel_collection_cached(
             ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", cloud_threshold)
         )
 
-        # Define cloud masking function for Sentinel-2
+        # Define cloud masking function for Sentinel-2 for SR harmonized
         def mask_s2_clouds(image):
             scl = image.select("SCL")
             mask = scl.neq(3).And(scl.neq(8)).And(scl.neq(9)).And(scl.neq(10))
@@ -730,7 +993,9 @@ def get_sentinel_collection_cached(
     if bands and bands != "None":
         collection = collection.select(bands)
 
-    def get_collection_size_with_timeout(collection):
+    def get_collection_size_with_timeout(
+        collection,
+    ):  # Checking size as a way to make sure it worked. Timeout included to throw failure and continue
         import concurrent.futures
         import time
 
@@ -758,8 +1023,18 @@ def get_sentinel_collection_optimized(
     bands: Optional[List[str]] = None,
     early_year: bool = False,
 ) -> ee.ImageCollection:
-    """
-    Optimized version of get_sentinel_collection that uses caching.
+    """get_sentinel_collection_optimized Use caching of the get_sentinel_collection
+
+    Args:
+        grid_cell: specific cell to be processed
+        start_date: start date of collection
+        end_date: end date of collection
+        cloud_threshold: Cloudy pixel percentage maximum. Defaults to 20.
+        bands: Bands to download. Defaults to None.
+        early_year: Whether to use early_year collection. Defaults to False.
+
+    Returns:
+        ee.ImageCollection: collection for the cell filtered by clouds, dates, and bands
     """
     # Convert grid cell to WGS84
     grid_cell_wgs84 = grid_cell.to_crs("EPSG:4326")
@@ -768,7 +1043,7 @@ def get_sentinel_collection_optimized(
     bounds = grid_cell_wgs84.total_bounds
     bounds_key = "_".join(str(x) for x in bounds)
 
-    # Convert bands to a cache-friendly format
+    # Convert bands to a cache-friendly format to be split in the cached function
     bands_key = "_".join(sorted(bands)) if isinstance(bands, list) else "None"
 
     # Use the cached function
@@ -793,8 +1068,7 @@ def process_sentinel_cell_optimized(
     failure_logger=None,
     progress_queue=None,
 ):
-    """
-    Optimized version of process_sentinel_cell with failure logging.
+    """process_sentinel_cell_optimized Processing a single cell with failure tracking
 
     Args:
         idx: Index of the cell in the grid
@@ -809,30 +1083,38 @@ def process_sentinel_cell_optimized(
         output_dir: Output directory
         session: Shared HTTP session
         early_year: Whether this is an early year (pre-2017)
-        failure_logger: Logger for recording failures
-        progress_queue: Queue for progress updates
+        failure_logger: Logger for recording failures. Defaults to None.
+        progress_queue: Queue for progress updates. Defaults to None.
 
     Returns:
-        Tuple of (cell_id, success_flag)
+        Tuple: cell id and a success flag
     """
     cell_id = cell["cell_id"]
     cell_gdf = grid_gdf.iloc[[idx]]
     placeholder_file = None
+
+    # Setting variables to be able to switch to early_year collection as needed
     retry = True
     trying_early_year = early_year
     try:
         while retry:
+
+            # Give up on switching to other collection if already done
             if trying_early_year:
                 retry = False
             if (
                 hasattr(session, "_creation_time")
                 and time.time() - session._creation_time > 1800
-            ):  # 30 minutes
+            ):
                 logger.info(
                     f"Session for cell {cell_id} is stale, creating fresh session"
-                )
-                session = create_optimized_session(max_workers=20, use_high_volume=True)
-            measure_memory_usage(before=True, cell_id=cell_id)
+                )  # Refresh when stale session
+                session = create_optimized_session(
+                    max_workers=20, use_high_volume=True
+                )  # Creating new session
+            measure_memory_usage(
+                before=True, cell_id=cell_id
+            )  # Measuring memory usage before processing
             logger.info(f"Processing cell {cell_id} for {country_name}, year {year}")
 
             # Create output directory early to mark as "in progress"
@@ -843,28 +1125,31 @@ def process_sentinel_cell_optimized(
             placeholder_file = cell_dir / ".processing"
             with open(placeholder_file, "w") as f:
                 f.write(f"Started: {datetime.now().isoformat()}")
-            band_arrays, missing = download_sentinel_data_optimized(
-                grid_cell=cell_gdf,
-                year=year,
-                bands=bands,
-                cloud_threshold=cloud_threshold,
-                composite_method=composite_method,
-                target_crs=target_crs,
-                session=session,
-                early_year=trying_early_year,
-                cell_id=cell_id,
-                failure_logger=failure_logger,  # Pass the failure logger
+
+            band_arrays, missing = (
+                download_sentinel_data_optimized(  # Downloading the data and determining if successful
+                    grid_cell=cell_gdf,
+                    year=year,
+                    bands=bands,
+                    cloud_threshold=cloud_threshold,
+                    composite_method=composite_method,
+                    target_crs=target_crs,
+                    session=session,
+                    early_year=trying_early_year,
+                    cell_id=cell_id,
+                    failure_logger=failure_logger,
+                )
             )
 
             if not band_arrays or missing:
                 error_msg = f"No or not enough data downloaded for {country_name} cell {cell_id} in {year}"
                 logger.warning(error_msg)
-                if not trying_early_year:
+                if not trying_early_year:  # Changing to new collection
                     logger.info(f"Retrying with other dataset")
                     trying_early_year = True
                     continue
 
-                # Log the failure
+                # Log the failure if not tring early year again
                 if failure_logger:
                     failure_logger.log_failure(
                         cell_id,
@@ -877,9 +1162,11 @@ def process_sentinel_cell_optimized(
                     placeholder_file.unlink()
                 return cell_id, False
             if trying_early_year:
-                band_arrays = rescale_early_year_data(band_arrays)
+                band_arrays = rescale_early_year_data(
+                    band_arrays
+                )  # Changing scale of this collection to original
             try:
-                save_band_arrays(
+                save_band_arrays(  # Saving the images
                     band_arrays=band_arrays,
                     output_dir=output_dir,
                     country_name=country_name,
@@ -900,7 +1187,7 @@ def process_sentinel_cell_optimized(
                     placeholder_file.unlink()
                 return cell_id, False
             try:
-                save_cell_metadata(
+                save_cell_metadata(  # Creating metadata file
                     country_name=country_name,
                     cell_id=cell_id,
                     year=year,
@@ -965,8 +1252,26 @@ def download_sentinel_data_optimized(
     failure_logger=None,
 ) -> Tuple[Dict[str, np.ndarray], bool]:
     """
-    Optimized version of download_sentinel_data with parallel month processing.
-    Exits immediately if any month processing fails with an error.
+    Download and process Sentinel-2 data for a grid cell with optimized parallel month processing.
+
+    Args:
+        grid_cell: GeoDataFrame containing the cell geometry
+        year: Year to process
+        cell_id: Identifier for the cell being processed
+        bands: List of bands to download
+        cloud_threshold: Maximum cloud cover percentage to accept
+        composite_method: Method for compositing images ('median' or 'mean')
+        images_per_month: Maximum number of images to use per month
+        total_target: Target total number of images to process
+        target_crs: Target coordinate reference system
+        session: HTTP session for downloads
+        early_year: Whether to use early year collection (pre-2017)
+        failure_logger: Logger for recording failures
+
+    Returns:
+        Tuple containing:
+            - Dictionary mapping band names to numpy arrays
+            - Boolean flag indicating if any months had missing data
     """
     try:
         # Track if any month processing has failed
@@ -990,7 +1295,7 @@ def download_sentinel_data_optimized(
                     max_retries: Maximum number of retry attempts
 
                 Returns:
-                    Tuple containing (month_idx, count, month_selection, month_selection_count, error_flag)
+                    Tuple containing (month_idx, count, selected_month_images, selected_image_count, error_flag)
                 """
                 month_idx, (start_date, end_date) = month_data
                 retry_delay = 2
@@ -1049,15 +1354,15 @@ def download_sentinel_data_optimized(
                                     )
 
                                 # Take up to images_per_month images
-                                month_selection = sorted_collection.limit(
+                                selected_month_images = sorted_collection.limit(
                                     images_per_month
                                 )
-                                month_selection_count = min(count, images_per_month)
+                                selected_image_count = min(count, images_per_month)
                                 return (
                                     month_idx,
                                     count,
-                                    month_selection,
-                                    month_selection_count,
+                                    selected_month_images,
+                                    selected_image_count,
                                     False,  # No error occurred
                                 )
                             except Exception as e:
@@ -1133,8 +1438,8 @@ def download_sentinel_data_optimized(
                     (
                         month_idx,
                         count,
-                        month_selection,
-                        month_selection_count,
+                        selected_month_images,
+                        selected_image_count,
                         error_occurred,
                     ) = future.result()
 
@@ -1144,9 +1449,9 @@ def download_sentinel_data_optimized(
                         # Continue to collect all results but we'll exit after
                     monthly_counts[month_idx] = count
 
-                    if month_selection is not None:
-                        selected_collections.append(month_selection)
-                        total_selected += month_selection_count
+                    if selected_month_images is not None:
+                        selected_collections.append(selected_month_images)
+                        total_selected += selected_image_count
                 except Exception as e:
                     error_msg = f"Error processing month result: {e}"
                     logger.error(error_msg)
@@ -1171,7 +1476,7 @@ def download_sentinel_data_optimized(
                 )
             return {}, False
         # Continue only if there were no month processing failures
-        # If we have fewer than total_target images, get more from months with extras
+        # If we haven't met our target image count, get additional images from months with extra available images
         if total_selected < total_target:
             additional_needed = total_target - total_selected
 
@@ -1212,18 +1517,20 @@ def download_sentinel_data_optimized(
                     else:
                         sorted_collection = collection.sort("CLOUDY_PIXEL_PERCENTAGE")
 
-                    # Skip the first images_per_month images (already selected)
-                    # and take up to the number needed
-                    to_take = min(extras, additional_needed - additional_count)
+                    # Skip the first images_per_month images (already selected) and take up to the number needed
+                    additional_images_needed = min(
+                        extras, additional_needed - additional_count
+                    )
 
-                    if to_take > 0:
+                    if additional_images_needed > 0:
                         count = collection.size().getInfo()
                         additional = sorted_collection.toList(count).slice(
-                            images_per_month, images_per_month + to_take
+                            images_per_month,
+                            images_per_month + additional_images_needed,
                         )
                         additional_collection = ee.ImageCollection(additional)
                         additional_collections.append(additional_collection)
-                        additional_count += to_take
+                        additional_count += additional_images_needed
                 except Exception as e:
                     error_msg = (
                         f"Error getting additional images for month {month_idx+1}: {e}"
@@ -1253,7 +1560,9 @@ def download_sentinel_data_optimized(
             total_images = merged_collection.size().getInfo()
 
         logger.debug(f"{cell_id} check of total images: {total_images}")
-        if not selected_collections or total_images < 10:
+        if (
+            not selected_collections or total_images < 10
+        ):  # Ensuring at least 10 images found and defaulting to other collection if need be
             if early_year and total_images == 0:
                 logger.warning(f"No images selected for {cell_id} {year}")
                 if failure_logger:
@@ -1268,6 +1577,7 @@ def download_sentinel_data_optimized(
                 logger.warning(f"Too few images for {cell_id}, trying other database")
                 return None, True
             else:
+                # Throwing a warning but continuing anyway
                 logger.warning(
                     f"Too few images {total_images} for {cell_id} but continuing anyway."
                 )
@@ -1377,23 +1687,24 @@ def download_single_band(
     max_retries=8,
 ):
     """
-    Download a single band from Earth Engine with improved error handling.
+    Download a single band from Earth Engine with robust error handling and retries.
 
     Args:
-        merged_collection: The merged image collection
-        band: The band to download
-        composite_method: Method for compositing
+        merged_collection: Earth Engine ImageCollection to download from
+        band: Band name to download
+        composite_method: Method for compositing images ('median' or 'mean')
         region: Earth Engine region geometry
-        width_meters: Width in meters
-        height_meters: Height in meters
-        target_crs: Target CRS
-        session: HTTP session to use
-        early_year: Whether this is an early year (pre-2017)
+        width_meters: Width of the region in meters
+        height_meters: Height of the region in meters
+        target_crs: Target coordinate reference system
+        session: HTTP session to use for download
+        early_year: Whether this is an early year dataset (pre-2017)
         failure_logger: Logger for recording failures
         cell_id: Cell ID for failure logging
+        max_retries: Maximum number of retry attempts
 
     Returns:
-        Numpy array containing the band data
+        numpy.ndarray: Array containing the band data or None if download failed
     """
     import tempfile
     import requests
@@ -1414,8 +1725,10 @@ def download_single_band(
 
     if session is None:
         session = requests
+
+    # Setting up retry mechanisms
     retry_delay = 2
-    tmp_path = None
+    temp_file_path = None
     url = None
     for attempt in range(max_retries):
         jitter = random.uniform(0.8, 1.2)
@@ -1462,6 +1775,7 @@ def download_single_band(
                     continue
                 else:
                     logger.error(f"Max retries reached for band {band}")
+                    # Log failure and return with no retry at max
                     if failure_logger and cell_id:
                         failure_logger.log_failure(
                             cell_id,
@@ -1476,11 +1790,11 @@ def download_single_band(
                     return None
             with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as tmp:
                 tmp.write(response.content)
-                tmp_path = tmp.name
+                temp_file_path = tmp.name
             # Read the GeoTIFF with rasterio
-            with rasterio.open(tmp_path) as src:
+            with rasterio.open(temp_file_path) as src:
                 band_array = src.read(1)
-                logger.info(f"Downloaded band {band} with shape {band_array.shape}")
+                logger.debug(f"Downloaded band {band} with shape {band_array.shape}")
 
                 # Verify we got reasonable data
                 if band_array.shape[0] < 5 or band_array.shape[1] < 5:
@@ -1495,8 +1809,8 @@ def download_single_band(
                             {"band": band, "shape": band_array.shape},
                         )
 
-                    os.unlink(tmp_path)
-                    tmp_path = None
+                    os.unlink(temp_file_path)
+                    temp_file_path = None
 
                     # Force URL regeneration and retry if not the last attempt
                     if attempt < max_retries - 1:
@@ -1508,9 +1822,9 @@ def download_single_band(
                     return None
 
             # Remove the temporary file
-            if tmp_path:
-                os.unlink(tmp_path)
-                tmp_path = None
+            if temp_file_path:
+                os.unlink(temp_file_path)
+                temp_file_path = None
 
             # Success! Return the band array
             return band_array
@@ -1522,14 +1836,14 @@ def download_single_band(
             logger.warning(error_msg)
 
             # Clean up temporary file if it exists
-            if tmp_path and os.path.exists(tmp_path):
+            if temp_file_path and os.path.exists(temp_file_path):
                 try:
-                    os.unlink(tmp_path)
-                    tmp_path = None
+                    os.unlink(temp_file_path)
+                    temp_file_path = None
                 except:
                     pass
 
-            # For most errors, we should try regenerating the URL
+            # Regenerate url for error
             url = None
 
             if attempt < max_retries - 1:
@@ -1555,10 +1869,20 @@ def download_single_band(
 
 def calculate_optimal_workers(config):
     """
-    Calculate the optimal number of worker threads based on system resources and EE limits,
-    with special handling for I/O-bound workloads.
+    Calculate the optimal number of worker threads based on system resources and EE limits.
+
+    Determines the optimal number of worker threads by considering:
+    - CPU cores and current usage
+    - Available memory and per-worker memory requirements
+    - Earth Engine rate limits
+    - Network connection limits
+
+    Args:
+        config: Configuration dictionary containing worker settings
+
+    Returns:
+        int: Optimal number of worker threads to use
     """
-    import psutil
 
     # Get configured max workers
     configured_max = config.get("max_workers", None)
@@ -1600,16 +1924,18 @@ def calculate_optimal_workers(config):
     # Memory-based limit - improved calculation
     total_memory_gb = psutil.virtual_memory().total / (1024**3)
     available_memory_gb = psutil.virtual_memory().available / (1024**3)
-    usable_memory_percentage = 0.9
+    max_memory_utilization_fraction = 0.9
     usable_memory_gb = min(
-        total_memory_gb * usable_memory_percentage,
+        total_memory_gb * max_memory_utilization_fraction,
         available_memory_gb * 0.95,
     )
     default_memory_per_worker = max(0.5, min(1.5, total_memory_gb / 20))
     memory_per_worker = config.get("memory_per_worker_gb", default_memory_per_worker)
     process_overhead_gb = max(1.0, total_memory_gb * 0.05)
-    worker_memory_gb = max(0.1, usable_memory_gb - process_overhead_gb)
-    memory_based_limit = max(int(worker_memory_gb / memory_per_worker), 12)
+    available_memory_for_workers_gb = max(0.1, usable_memory_gb - process_overhead_gb)
+    memory_based_limit = max(
+        int(available_memory_for_workers_gb / memory_per_worker), 12
+    )
 
     # Network-based limit
     network_based_limit = max_concurrent
@@ -1644,12 +1970,15 @@ def calculate_optimal_workers(config):
 
 def cleanup_processing_files(output_dir, country_name, year):
     """
-    Clean up any leftover processing.json files from previous runs.
+    Clean up any leftover processing files from previous incomplete runs.
+
+    Finds and removes temporary processing files that may have been left
+    behind due to interrupted runs.
 
     Args:
-        output_dir: Base output directory
-        country_name: Name of the country
-        year: Year to process
+        output_dir: Base output directory path
+        country_name: Name of the country being processed
+        year: Year being processed
     """
     logger.info(f"Cleaning up processing files for {country_name}, year {year}")
 
@@ -1700,20 +2029,31 @@ def cleanup_processing_files(output_dir, country_name, year):
 
 
 def measure_memory_usage(before=True, cell_id=None):
-    """Measure memory usage before/after processing a cell."""
-    import psutil
-    import os
+    """
+    Measure memory usage before and after processing a cell to track memory consumption.
+
+    Uses thread-local storage to track memory usage across function calls.
+
+    Args:
+        before: If True, records starting memory; if False, calculates the difference
+        cell_id: Cell ID for logging purposes
+
+    Returns:
+        float: Memory difference in MB if before=False, 0 otherwise
+    """
 
     process = psutil.Process(os.getpid())
     memory_info = process.memory_info()
     memory_mb = memory_info.rss / (1024 * 1024)
 
     if before:
+        # Tracking before memory usage to find after
         thread_name = threading.current_thread().name
         thread_local_data = threading.local()
         thread_local_data.start_memory = memory_mb
         logger.debug(f"Memory before processing cell {cell_id}: {memory_mb:.1f} MB")
     else:
+        # Finding after memory usage to find diff
         if hasattr(threading.local(), "start_memory"):
             memory_diff = memory_mb - threading.local().start_memory
             logger.debug(
@@ -1726,10 +2066,14 @@ def measure_memory_usage(before=True, cell_id=None):
 
 def estimate_memory_per_worker(sample_size=3, early_year=False):
     """
-    Estimate memory usage per worker by processing a few sample cells.
+    Estimate memory usage per worker by processing sample cells.
+
+    Runs a simplified version of the cell processing to measure memory consumption
+    and determine appropriate memory allocation per worker.
 
     Args:
-        sample_size: Number of cells to sample
+        sample_size: Number of sample cells to process
+        early_year: Whether to use early year collection
 
     Returns:
         float: Estimated memory usage per worker in GB
@@ -1743,7 +2087,7 @@ def estimate_memory_per_worker(sample_size=3, early_year=False):
 
     # Process a few sample cells with a single worker
     for i in range(sample_size):
-        # Force garbage collection before measurement
+
         gc.collect()
 
         # Measure memory before
@@ -1779,12 +2123,17 @@ def estimate_memory_per_worker(sample_size=3, early_year=False):
 
 def calculate_optimal_cache_size(early_year):
     """
-    Calculate optimal LRU cache size based on available memory and measured collection size.
+    Calculate optimal LRU cache size based on available memory and collection size.
+
+    Determines how many Earth Engine collections can be cached based on
+    available memory and measured memory usage per cached collection.
+
+    Args:
+        early_year: Whether to use early year collection for testing
 
     Returns:
-        int: Optimal cache size
+        int: Optimal LRU cache size (number of items)
     """
-    import psutil
 
     # Get available memory in GB
     available_memory_gb = psutil.virtual_memory().available / (1024**3)
@@ -1816,7 +2165,12 @@ _OPTIMAL_CACHE_SIZE = 200
 
 
 def update_lru_cache_size(new_size):
-    """Update the global LRU cache size."""
+    """
+    Update the global LRU cache size parameter.
+
+    Args:
+        new_size: New size for the LRU cache
+    """
     global _OPTIMAL_CACHE_SIZE
     _OPTIMAL_CACHE_SIZE = new_size
     logger.info(f"Updated LRU cache size to {new_size}")
@@ -1826,20 +2180,19 @@ def measure_collection_memory_usage(sample_size=5, early_year=False):
     """
     Measure the actual memory usage of cached Earth Engine collections.
 
+    Creates sample Earth Engine collections and measures their memory usage
+    to calculate optimal cache size.
+
     Args:
         sample_size: Number of collections to sample
+        early_year: Whether to use early year collection
 
     Returns:
         float: Average memory usage per collection in MB
     """
-    import gc
-    import psutil
-    import random
-    import sys
 
     logger.info("Measuring memory usage of cached Earth Engine collections...")
 
-    # Force garbage collection before starting
     gc.collect()
 
     # Initial memory usage
@@ -1880,7 +2233,6 @@ def measure_collection_memory_usage(sample_size=5, early_year=False):
 
         # Sample collections
         for i in range(min(sample_size, len(sample_bounds))):
-            # Force garbage collection
             gc.collect()
 
             # Measure memory before
@@ -1953,12 +2305,16 @@ def measure_collection_memory_usage(sample_size=5, early_year=False):
 def process_sample_cell(early_year=False):
     """
     Process a sample cell to estimate memory usage.
-    Creates a small Earth Engine collection and performs typical operations.
+
+    Creates a small Earth Engine collection and performs typical operations
+    to simulate actual processing for memory estimation purposes.
+
+    Args:
+        early_year: Whether to use early year collection
 
     Returns:
-        dict: Sample results
+        dict: Sample results with count and statistics
     """
-    import random
 
     # Create a small random area
     x = random.uniform(-180, 180)
@@ -2005,6 +2361,9 @@ def get_monthly_date_ranges(year: int) -> List[Tuple[str, str]]:
     """
     Generate start and end date strings for each month in the given year.
 
+    Creates a list of date range tuples (start_date, end_date) for every month
+    in the specified year, formatted as 'YYYY-MM-DD'.
+
     Args:
         year: The year to generate date ranges for
 
@@ -2031,16 +2390,19 @@ def save_band_arrays(
     early_year: bool,
 ) -> None:
     """
-    Process and save band arrays using the optimized format.
+    Process and save band arrays to disk in both original GeoTIFF and optimized formats.
+
+    First saves original GeoTIFF files with geospatial information, then processes
+    and saves data in an optimized format. Finally cleans up temporary files.
 
     Args:
         band_arrays: Dictionary mapping band names to numpy arrays
-        output_dir: Directory to save the files
+        output_dir: Base output directory path
         country_name: Name of the country
         cell_id: ID of the grid cell
         year: Year of the data
-        grid_cell: The GeoDataFrame containing the cell geometry and CRS
-        target_crs: Target CRS to convert to before saving
+        grid_cell: GeoDataFrame containing the cell geometry
+        target_crs: Target coordinate reference system
         early_year: Whether this is an early year (pre-2017)
     """
     if not band_arrays:
@@ -2133,7 +2495,10 @@ def save_cell_metadata(
     early_year: bool,
 ) -> None:
     """
-    Save comprehensive metadata for a processed cell.
+    Create and save comprehensive metadata for a processed cell.
+
+    Generates detailed metadata including spatial information, processing parameters,
+    and array statistics, and saves it as a JSON file alongside the processed data.
 
     Args:
         country_name: Name of the country
@@ -2144,7 +2509,7 @@ def save_cell_metadata(
         output_dir: Base output directory
         composite_method: Method used for compositing
         cloud_threshold: Cloud threshold used for filtering
-        band_arrays: Dictionary of band arrays (for shape information)
+        band_arrays: Dictionary of band arrays for shape/stats information
         early_year: Whether this is an early year (pre-2017)
     """
     # Create output directory
@@ -2231,7 +2596,13 @@ def save_cell_metadata(
 
 # Monkey patch ee.data methods to count requests
 def setup_request_counting():
-    """Set up request counting by monkey patching Earth Engine methods."""
+    """
+    Set up request counting by monkey patching Earth Engine methods.
+
+    Replaces key Earth Engine data methods with wrapped versions that
+    increment a counter each time they're called, enabling monitoring
+    of Earth Engine API usage rates.
+    """
     # Store original methods
     original_getInfo = ee.data.getInfo
     original_getList = ee.data.getList
@@ -2268,208 +2639,12 @@ def setup_request_counting():
     logger.info("Set up request counting for Earth Engine methods")
 
 
-def monitor_request_rate(stop_event):
-    """Monitor the actual request rate to Earth Engine with moving average."""
-    last_count = 0
-    last_time = time.time()
-    rate_history = []
-
-    while not stop_event.is_set():
-        try:
-            current_count = sum(request_counter.counts.values())
-            current_time = time.time()
-
-            elapsed = current_time - last_time
-            requests = current_count - last_count
-
-            if elapsed > 0:
-                current_rate = requests / elapsed * 60  # requests per minute
-                rate_history.append(current_rate)
-
-                # Keep only the last 5 measurements for moving average
-                if len(rate_history) > 5:
-                    rate_history.pop(0)
-
-                avg_rate = sum(rate_history) / len(rate_history)
-
-                # Calculate percentage of Earth Engine limit
-                limit_percentage = avg_rate / 6000 * 100
-
-                logger.info(
-                    f"Earth Engine request rate: {current_rate:.1f} req/min (avg: {avg_rate:.1f}, {limit_percentage:.1f}% of limit)"
-                )
-
-            last_count = current_count
-            last_time = current_time
-
-        except Exception as e:
-            logger.error(f"Error in request rate monitoring: {e}")
-
-        time.sleep(15)
-
-
-def monitor_and_recover_processing(stop_event):
-    """
-    Enhanced monitoring function with complete restart capability when stalled.
-    """
-    last_request_count = 0
-    last_active_time = time.time()
-    consecutive_stalls = 0
-    recovery_attempts = 0
-
-    # Keep track of when workers were last restarted
-    last_worker_restart = time.time()
-
-    while not stop_event.is_set():
-        try:
-            current_count = sum(request_counter.counts.values())
-            current_time = time.time()
-
-            # Monitor memory usage for leaks
-            process = psutil.Process(os.getpid())
-            current_memory = process.memory_info().rss / (1024 * 1024)
-
-            # Check if requests are being made
-            if current_count > last_request_count:
-                # Activity detected, reset stall counter
-                consecutive_stalls = 0
-                recovery_attempts = 0  # Reset recovery attempts on successful activity
-                last_active_time = current_time
-                last_request_count = current_count
-                logger.debug(
-                    f"Processing active: {current_count - last_request_count} new requests, "
-                    f"Memory: {current_memory:.1f} MB"
-                )
-            else:
-                # No new requests detected
-                elapsed = current_time - last_active_time
-                if elapsed > 120:  # 2 minutes of inactivity
-                    consecutive_stalls += 1
-                    logger.warning(
-                        f"Processing appears stalled for {elapsed:.1f} seconds (stall #{consecutive_stalls}), "
-                        f"Memory: {current_memory:.1f} MB"
-                    )
-
-                    # After multiple consecutive stalls, try recovery actions
-                    if consecutive_stalls >= 2:
-                        recovery_attempts += 1
-                        logger.error(
-                            f"Processing stalled for {consecutive_stalls} consecutive checks, "
-                            f"attempting recovery (attempt #{recovery_attempts})"
-                        )
-
-                        try:
-                            # Escalating recovery actions based on number of attempts
-                            if recovery_attempts == 1:
-                                # First attempt: basic recovery
-                                perform_basic_recovery()
-                            elif recovery_attempts == 2:
-                                # Second attempt: intermediate recovery
-                                perform_intermediate_recovery()
-                            else:
-                                # Third+ attempt: COMPLETE RESTART
-                                logger.critical(
-                                    "CRITICAL STALL DETECTED. Initiating full process restart!"
-                                )
-
-                                # Save command line arguments and restart the process
-                                python = sys.executable
-                                os.execl(python, python, *sys.argv)
-                                # This will completely restart the current Python process
-                                # No code after this point will execute in the current process
-
-                        except Exception as e:
-                            logger.error(f"Error during recovery: {e}")
-                            logger.exception("Recovery error details:")
-
-                        # Reset stall counter but not recovery attempts
-                        last_active_time = current_time
-                        consecutive_stalls = 0
-
-            # Periodic full reset regardless of stalls (every 2 hours)
-            if current_time - last_worker_restart > 7200:  # 2 hours
-                logger.info("Performing scheduled preventative recovery")
-                perform_intermediate_recovery()
-                last_worker_restart = current_time
-
-        except Exception as e:
-            logger.error(f"Error in monitoring thread: {e}")
-
-        time.sleep(30)  # Check every 30 seconds
-
-
-def perform_basic_recovery():
-    """Basic recovery actions for first stall detection."""
-    logger.info("Performing basic recovery actions")
-
-    # Force garbage collection
-    gc.collect(generation=2)
-
-    # Clear function caches
-    if hasattr(get_sentinel_collection_cached, "cache_clear"):
-        get_sentinel_collection_cached.cache_clear()
-
-    # Check for and kill any zombie threads
-    check_for_zombie_threads(timeout_seconds=300)  # 5 minutes
-
-
-def perform_intermediate_recovery():
-    """Intermediate recovery for repeated stalls."""
-    logger.info("Performing intermediate recovery actions")
-
-    # Do basic recovery first
-    perform_basic_recovery()
-
-    # Refresh Earth Engine session more aggressively
-    try:
-        logger.info("Refreshing Earth Engine session")
-        ee.Reset()
-        time.sleep(3)
-
-        ee.Initialize(
-            project="wealth-satellite-forecasting",
-            opt_url="https://earthengine-highvolume.googleapis.com",
-        )
-        setup_request_counting()
-    except Exception as e:
-        logger.error(f"Error refreshing Earth Engine: {e}")
-
-    # Create new global HTTP session
-    try:
-        logger.info("Creating new HTTP session with fresh connection pool")
-        global_session = create_optimized_session(max_workers=20, use_high_volume=True)
-
-        # Test the new session
-        test_response = global_session.get(
-            "https://earthengine.googleapis.com", timeout=10
-        )
-        logger.info(f"New session test response: {test_response.status_code}")
-    except Exception as e:
-        logger.error(f"Error creating new session: {e}")
-
-
-def check_for_zombie_threads(timeout_seconds=300):
-    """Check for and log any threads that have been running too long."""
-    current_time = time.time()
-    for thread in threading.enumerate():
-        # Skip daemon threads and main thread
-        if thread.daemon or thread.name == "MainThread":
-            continue
-
-        # Check if thread has thread-local start time
-        if (
-            hasattr(thread, "_start_time")
-            and current_time - thread._start_time > timeout_seconds
-        ):
-            logger.warning(
-                f"Potential zombie thread detected: {thread.name}, "
-                f"running for {current_time - thread._start_time:.1f} seconds"
-            )
-
-
 def progress_updater_thread(queue, total, desc, stop_event):
     """
-    Thread function to handle progress bar updates from a queue at a consistent rate.
+    Update progress bar from a queue at a consistent rate.
+
+    Runs as a background thread to handle progress updates, batching them
+    together for smoother display and reducing update frequency.
 
     Args:
         queue: Queue containing progress update increments
@@ -2481,7 +2656,7 @@ def progress_updater_thread(queue, total, desc, stop_event):
     update_interval = 45
 
     with tqdm(total=total, desc=desc) as pbar:
-        accumulated_progress = 0
+        pending_progress_updates = 0
         last_update_time = time.time()
 
         while not stop_event.is_set() or not queue.empty():
@@ -2493,7 +2668,7 @@ def progress_updater_thread(queue, total, desc, stop_event):
                 try:
                     # Non-blocking queue get
                     increment = queue.get_nowait()
-                    accumulated_progress += increment
+                    pending_progress_updates += increment
                     items_processed += 1
                     queue.task_done()
                 except Empty:
@@ -2507,9 +2682,9 @@ def progress_updater_thread(queue, total, desc, stop_event):
             time_since_update = current_time - last_update_time
 
             # Update the progress bar at fixed intervals
-            if time_since_update >= update_interval and accumulated_progress > 0:
-                pbar.update(accumulated_progress)
-                accumulated_progress = 0
+            if time_since_update >= update_interval and pending_progress_updates > 0:
+                pbar.update(pending_progress_updates)
+                pending_progress_updates = 0
                 last_update_time = current_time
 
             # If no items were processed, sleep a bit to avoid CPU spinning
@@ -2517,16 +2692,19 @@ def progress_updater_thread(queue, total, desc, stop_event):
                 time.sleep(min(0.1, update_interval / 5))
 
         # Final update to ensure we don't miss any progress
-        if accumulated_progress > 0:
-            pbar.update(accumulated_progress)
+        if pending_progress_updates > 0:
+            pbar.update(pending_progress_updates)
 
 
 def count_total_images(collections):
     """
     Count the total number of images across all Earth Engine ImageCollections.
 
+    Recursively traverses collections to count the total number of images,
+    handling both ImageCollection objects and lists of collections.
+
     Args:
-        collections: List of ee.ImageCollection objects
+        collections: List of ee.ImageCollection objects or a single collection
 
     Returns:
         int: Total number of images
@@ -2553,7 +2731,10 @@ def count_total_images(collections):
 
 def rescale_early_year_data(band_arrays):
     """
-    Rescale data from early year collection to match the scale of standard Sentinel-2 data.
+    Rescale data from early year collection to match standard Sentinel-2 scale.
+
+    Applies appropriate scaling factors to band arrays from early year collections
+    to make them comparable with standard Sentinel-2 data.
 
     Args:
         band_arrays: Dictionary of band arrays

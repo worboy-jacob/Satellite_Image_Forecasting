@@ -1,9 +1,15 @@
-# scripts/main.py
+"""
+Main entry point for the satellite imagery processing pipeline.
+
+Controls the full workflow from grid generation through data download,
+processing, repair, and fusion of Sentinel-2 and VIIRS imagery.
+"""
+
 import sys
 import json
 from pathlib import Path
-import os
 
+# Add project root to path to enable imports regardless of execution location
 sys.path.append(str(Path(__file__).parent.parent.parent.parent.parent))
 
 from src.utils.logging_config import setup_logging
@@ -56,6 +62,7 @@ def save_problematic_cells(country_name, year, sentinel_failures, viirs_failures
     combined_dir = get_results_dir() / "Images" / "Combined" / country_name / str(year)
     combined_dir.mkdir(parents=True, exist_ok=True)
 
+    # Document unresolved failures for future reference or manual intervention
     problematic_cells = {
         "country": country_name,
         "year": year,
@@ -94,7 +101,7 @@ def get_failed_cells(data_type, country_name, year):
                 failure = json.loads(line.strip())
                 cell_id = failure.get("cell_id")
                 if cell_id is not None and cell_id != "global" and cell_id != "batch":
-                    # Convert string cell_id to int if needed
+                    # Convert string cell_id to int if needed for consistent handling
                     if isinstance(cell_id, str) and cell_id.isdigit():
                         cell_id = int(cell_id)
                     if isinstance(cell_id, int):
@@ -116,7 +123,7 @@ def process_country_year_pair(config, country_name, year, grid_gdf, logger):
 
     logger.info(f"Processing {country_name}, year {year}")
 
-    # Step 1: Download Sentinel data
+    # === STEP 1: SENTINEL DATA ACQUISITION ===
     logger.info(f"Downloading Sentinel-2 data for {country_name}, year {year}")
     download_sentinel_for_country_year(
         config=config,
@@ -125,7 +132,7 @@ def process_country_year_pair(config, country_name, year, grid_gdf, logger):
         grid_gdf=grid_gdf,
     )
 
-    # Step 2: Download VIIRS data
+    # === STEP 2: VIIRS DATA ACQUISITION ===
     logger.info(f"Downloading VIIRS data for {country_name}, year {year}")
     download_viirs_for_country_year(
         config=config,
@@ -187,6 +194,7 @@ def process_country_year_pair(config, country_name, year, grid_gdf, logger):
 
     # Step 6: Combine Sentinel and VIIRS data
     logger.info(f"Combining Sentinel and VIIRS data for {country_name}, year {year}")
+    # Keep originals until we verify the combined data is valid
     combine_result = combine_sentinel_viirs_data(
         countries=[country_name],
         years=[year],

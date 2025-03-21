@@ -1,37 +1,31 @@
-countries:
-  # - name: "Senegal"
-  #   iso: "SEN"
-  #   years: [2015] #2017,2016,2015
-  #   crs: "EPSG:32628"
-  #   validate_files: True
-  #   validation_sample_ratio: 0.2
+# Information needed for each country
+countries: 
+  - name: "Senegal" # Named country
+    iso: "SEN" # The 3-letter ISO code to be used for file names
+    years: [2024, 2023, 2019, 2018, 2017, 2016]  # Years to process for the country
+    crs: "EPSG:32628" # The crs to be used
 
   - name: "Ghana"
     iso: "GHA"
-    years: [2019]
+    years: [2022]
     crs: "EPSG:32630" 
-    validate_files: True
-    validation_sample_ratio: 0.2
 
-log_level: "INFO"
+# Information for building the grid for a country
+cell_size_km: 5 # Length of each grid cell
+min_area_percent: 40.0 # Minimum area of overlap with Senegal to keep the grid cell
 
-cell_size_km: 5
-min_area_percent: 40.0
-
-max_workers: -2
-verbose: 10
-
-
+# Download information
 sentinel:
-  bands: ["B2", "B3", "B4", "B8", "B5", "B6", "B7", "B11", "B12"]
-  cloud_threshold: 20
-  composite_method: "median"
+  bands: ["B2", "B3", "B4", "B8", "B5", "B6", "B7", "B11", "B12"] # Bands needed
+  cloud_threshold: 20 # Threshold of clouds to use image in aggregates
+  composite_method: "median" # Method to create an annual composite
 
-
-# Add this section to your existing config.yaml
 viirs:
-  collection: "NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG"
-  bands: ["avg_rad"]
-  temporal_aggregation: "annual"  # Options: "annual", "monthly"
-  composite_method: "median"  # Options: "median", "mean"
-  sample_points_per_country: 5000  # For normalization statistics
+  bands: ["avg_rad"] # Bands used
+  composite_method: "median"  # Method to create annual composite
+
+# Utilities
+log_level: "INFO" #Setup log_level
+
+max_workers: -2 # For threading (-2 means all workers minus 1)
+verbose: 10 # Level of detail

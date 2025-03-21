@@ -1,0 +1,12 @@
+earthengine_api
+geopandas
+numpy
+opencv_python
+psutil
+PyYAML
+rasterio
+Requests
+setuptools
+Shapely
+tqdm
+urllib3

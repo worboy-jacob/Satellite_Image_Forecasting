@@ -1,20 +1,28 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="wealth_mapping",
+    name="WealthMapping",
     version="0.1.0",
-    packages=find_packages(),
+    description="Package for WealthMapping",
+    packages=find_packages(where="src"),
+    package_dir={"": "src"},
     install_requires=[
-        "pandas",
         "geopandas",
-        "numpy",
-        "shapely",
-        "folium",
-        "branca",
-        "rtree",
-        "tqdm",
+        "joblib",
         "matplotlib",
-        "contextily",
+        "numpy",
+        "pandas",
+        "psutil",
+        "PyYAML",
+        "setuptools",
+        "Shapely",
+        "tqdm",
     ],
-    description="A package for mapping wealth indices using GPS data",
+    package_data={"": ["d:\satellite\Code\WealthMapping\config\config.yaml"]},
+    entry_points={
+        "console_scripts": [
+            "WealthMapping=main:main",
+        ],
+    },
+    python_requires=">=3.12",
 )

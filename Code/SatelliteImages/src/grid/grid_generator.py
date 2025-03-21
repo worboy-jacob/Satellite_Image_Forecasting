@@ -1,10 +1,15 @@
-# src/grid/grid_generator.py
+"""
+Grid generation utilities for creating and managing geospatial grids.
+
+Provides functionality to create uniform grid cells over country boundaries
+for consistent spatial analysis and satellite image processing.
+"""
+
 import geopandas as gpd
 import numpy as np
 from pathlib import Path
 import logging
 from shapely.geometry import box
-import os
 from typing import Optional, Union, List
 
 from src.utils.paths import find_shapefile, get_results_dir
@@ -20,16 +25,21 @@ def create_grid(
     output_path: Optional[Path] = None,
 ) -> gpd.GeoDataFrame:
     """
-    Create a grid of cells over a country.
+    Create a grid of uniform cells over a country boundary.
+
+    Generates a grid of rectangular cells aligned to the country's bounding box,
+    then filters cells based on their overlap with the actual country boundary.
+    Each cell is assigned a unique sequential ID for reference.
 
     Args:
-        country_name: Name of the country
-        cell_size_km: Size of each cell in kilometers
-        target_crs: Coordinate reference system to use (e.g., 'EPSG:32628')
+        country_name: Name of the country to create grid for
+        cell_size_km: Size of each grid cell in kilometers
+        target_crs: Coordinate reference system (e.g., 'EPSG:32628')
+        min_area_percent: Minimum percentage of cell area that must overlap with country
         output_path: Path to save the grid shapefile (optional)
 
     Returns:
-        GeoDataFrame with grid cells that intersect with the country
+        GeoDataFrame with grid cells that meet the overlap threshold
 
     Raises:
         FileNotFoundError: If the country shapefile cannot be found
@@ -42,7 +52,7 @@ def create_grid(
 
         country_gdf = gpd.read_file(country_shapefile)
 
-        # Ensure the country GeoDataFrame is in the target CRS
+        # Ensure consistent coordinate reference system
         if country_gdf.crs is None:
             logger.warning(
                 f"Country shapefile has no CRS defined. Assuming {target_crs}"
@@ -57,13 +67,13 @@ def create_grid(
         # Get the bounds of the country
         bounds = country_gdf.total_bounds  # (minx, miny, maxx, maxy)
 
-        # Calculate cell size in the units of the CRS (usually meters)
+        # Convert cell size from kilometers to CRS units (typically meters)
         cell_size = cell_size_km * 1000  # Convert km to meters
 
         # Create grid cells
         x_min, y_min, x_max, y_max = bounds
 
-        # Calculate number of cells in each direction
+        # Determine grid dimensions based on country bounds and cell size
         n_cells_x = int(np.ceil((x_max - x_min) / cell_size))
         n_cells_y = int(np.ceil((y_max - y_min) / cell_size))
 
@@ -86,7 +96,7 @@ def create_grid(
                 )  # Ensure we don't exceed bounds
                 cell_y_max = min(cell_y_min + cell_size, y_max)
 
-                # Create cell polygon
+                # Create rectangular cell geometry
                 cell = box(cell_x_min, cell_y_min, cell_x_max, cell_y_max)
                 grid_cells.append(cell)
                 cell_ids.append(cell_id)
@@ -103,7 +113,7 @@ def create_grid(
         )
         country_union = country_gdf.unary_union
 
-        # Calculate the intersection area for each cell
+        # Calculate how much of each cell overlaps with the country boundary
         grid_gdf["intersection"] = grid_gdf.geometry.apply(
             lambda cell: cell.intersection(country_union)
         )
@@ -157,14 +167,18 @@ def get_or_create_grid(
     """
     Get an existing grid or create a new one if it doesn't exist.
 
+    Looks for a previously created grid file and loads it if available,
+    otherwise generates a new grid and saves it for future use.
+
     Args:
         country_name: Name of the country
         cell_size_km: Size of each cell in kilometers
         target_crs: Coordinate reference system to use
+        min_area_percent: Minimum percentage of cell area that must overlap with country
         force_recreate: If True, recreate the grid even if it exists
 
     Returns:
-        GeoDataFrame with grid cells
+        GeoDataFrame with grid cells that meet the overlap threshold
     """
     # Define the path where the grid would be saved
     grid_dir = get_results_dir() / "grids"

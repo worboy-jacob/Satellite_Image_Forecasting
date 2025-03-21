@@ -1,4 +1,3 @@
-# src/utils/paths.py
 from pathlib import Path
 
 
@@ -28,12 +27,15 @@ def get_logs_dir() -> Path:
 
 
 def get_Code_dir() -> Path:
+    """Returns the code directory"""
     return get_project_root() / "Code"
 
 
 def get_WealthIndex_dir() -> Path:
+    """Return the specific wealth index directory."""
     return get_Code_dir() / "WealthIndex"
 
 
 def get_configs_dir() -> Path:
+    """Return the config directory."""
     return get_WealthIndex_dir() / "config"

@@ -1,0 +1,12 @@
+joblib
+matplotlib
+numpy
+pandas
+prince
+psutil
+PyYAML
+scikit_learn
+scipy
+seaborn
+setuptools
+tqdm
