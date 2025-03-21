@@ -1,1 +1,5 @@
 data/Results/SatelliteImageData/
+*.pyc
+*.DS_Store
+*.log
+Code/SatelliteImages/logs/
