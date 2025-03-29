@@ -23,7 +23,7 @@ sns.set(style="whitegrid", context="talk")
 # =============================================================================
 
 # Define folder path to the GPKG files
-folder_path = Path(__file__).parent / "data" / "Results" / "LabelledGrids"
+folder_path = Path(__file__).parent.parent.parent / "data" / "Results" / "LabelledGrids"
 all_files = glob(os.path.join(folder_path, "*.gpkg"))
 
 # Filter files to include only those with "labelled_inferred" in the name (case insensitive)
@@ -382,7 +382,7 @@ predictions_df = pd.read_csv("predictions_by_cell_2024.csv")
 
 # Load actual 2024 data from the GPKG file
 actual_2024_file = (
-    Path(__file__).parent
+    Path(__file__).parent.parent.parent
     / "data"
     / "LabelledGrids"
     / "Senegal_2024_wealthindex_labelled_inferred.gpkg"
