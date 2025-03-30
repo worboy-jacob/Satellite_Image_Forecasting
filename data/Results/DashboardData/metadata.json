@@ -1,0 +1,222 @@
+{
+  "years": [
+    "2016",
+    "2017",
+    "2018",
+    "2019",
+    "2023",
+    "2024"
+  ],
+  "global_min": 0.1708889603614807,
+  "global_max": 0.7656928451215635,
+  "stats": {
+    "2016": {
+      "original": {
+        "median": 0.37768758461022045,
+        "mean": 0.40818868300323247,
+        "min": 0.240412444042824,
+        "max": 0.6888593986986555,
+        "std": 0.09909623602836588
+      },
+      "inferred": {
+        "median": 0.3452983796596527,
+        "mean": 0.3585360439534826,
+        "min": 0.21193501353263855,
+        "max": 0.6888593986986555,
+        "std": 0.06587393552853986
+      }
+    },
+    "2017": {
+      "original": {
+        "median": 0.39460672430026117,
+        "mean": 0.4144794066624788,
+        "min": 0.25957664214428783,
+        "max": 0.6998649898462025,
+        "std": 0.09098526972668922
+      },
+      "inferred": {
+        "median": 0.35629576444625854,
+        "mean": 0.3710588722305029,
+        "min": 0.2259269803762436,
+        "max": 0.6998649898462025,
+        "std": 0.06788842042038691
+      }
+    },
+    "2018": {
+      "original": {
+        "median": 0.4187825339897146,
+        "mean": 0.43840259552285576,
+        "min": 0.24446196412896556,
+        "max": 0.7333144537547084,
+        "std": 0.10405204240363693
+      },
+      "inferred": {
+        "median": 0.3669518232345581,
+        "mean": 0.38331094110763236,
+        "min": 0.22485671937465668,
+        "max": 0.7333144537547084,
+        "std": 0.07345745377519136
+      }
+    },
+    "2019": {
+      "original": {
+        "median": 0.42925972844295834,
+        "mean": 0.44734342931713844,
+        "min": 0.25674344149408024,
+        "max": 0.7656928451215635,
+        "std": 0.10807169628755256
+      },
+      "inferred": {
+        "median": 0.38417521119117737,
+        "mean": 0.3963465101589978,
+        "min": 0.1708889603614807,
+        "max": 0.7656928451215635,
+        "std": 0.07295570742344433
+      }
+    },
+    "2023": {
+      "original": {
+        "median": 0.46492527081548124,
+        "mean": 0.47529718298397167,
+        "min": 0.2927548462134459,
+        "max": 0.717193456196393,
+        "std": 0.08822334744108914
+      },
+      "inferred": {
+        "median": 0.41425639390945435,
+        "mean": 0.423600082656069,
+        "min": 0.19404442608356476,
+        "max": 0.717193456196393,
+        "std": 0.0743362043494275
+      }
+    },
+    "2024": {
+      "inferred": {
+        "median": 0.40977242588996887,
+        "mean": 0.41716371770009797,
+        "min": 0.17406152188777924,
+        "max": 0.729511022567749,
+        "std": 0.07651293476945448
+      }
+    }
+  },
+  "chart_data": {
+    "Year": [
+      2016,
+      2017,
+      2018,
+      2019,
+      2023,
+      2024
+    ],
+    "Original Data": [
+      0.37768758461022045,
+      0.39460672430026117,
+      0.4187825339897146,
+      0.42925972844295834,
+      0.46492527081548124,
+      null
+    ],
+    "Satellite Image Predicted Data": [
+      0.3452983796596527,
+      0.35629576444625854,
+      0.3669518232345581,
+      0.38417521119117737,
+      0.41425639390945435,
+      0.40977242588996887
+    ]
+  },
+  "processed_data": {
+    "2016": {
+      "original": {
+        "geojson_path": "c:\\Users\\worbo\\Documents\\TUM_Courses\\Winter_24-25\\Python\\satellite\\data\\Results\\DashboardData\\2016_original.geojson",
+        "center": {
+          "lat": 14.352297491708658,
+          "lon": -14.468797689196338
+        }
+      },
+      "inferred": {
+        "geojson_path": "c:\\Users\\worbo\\Documents\\TUM_Courses\\Winter_24-25\\Python\\satellite\\data\\Results\\DashboardData\\2016_inferred.geojson",
+        "center": {
+          "lat": 14.352297491708658,
+          "lon": -14.468797689196338
+        }
+      }
+    },
+    "2017": {
+      "original": {
+        "geojson_path": "c:\\Users\\worbo\\Documents\\TUM_Courses\\Winter_24-25\\Python\\satellite\\data\\Results\\DashboardData\\2017_original.geojson",
+        "center": {
+          "lat": 14.352297491708658,
+          "lon": -14.468797689196338
+        }
+      },
+      "inferred": {
+        "geojson_path": "c:\\Users\\worbo\\Documents\\TUM_Courses\\Winter_24-25\\Python\\satellite\\data\\Results\\DashboardData\\2017_inferred.geojson",
+        "center": {
+          "lat": 14.352297491708658,
+          "lon": -14.468797689196338
+        }
+      }
+    },
+    "2018": {
+      "original": {
+        "geojson_path": "c:\\Users\\worbo\\Documents\\TUM_Courses\\Winter_24-25\\Python\\satellite\\data\\Results\\DashboardData\\2018_original.geojson",
+        "center": {
+          "lat": 14.352297491708658,
+          "lon": -14.468797689196338
+        }
+      },
+      "inferred": {
+        "geojson_path": "c:\\Users\\worbo\\Documents\\TUM_Courses\\Winter_24-25\\Python\\satellite\\data\\Results\\DashboardData\\2018_inferred.geojson",
+        "center": {
+          "lat": 14.352297491708658,
+          "lon": -14.468797689196338
+        }
+      }
+    },
+    "2019": {
+      "original": {
+        "geojson_path": "c:\\Users\\worbo\\Documents\\TUM_Courses\\Winter_24-25\\Python\\satellite\\data\\Results\\DashboardData\\2019_original.geojson",
+        "center": {
+          "lat": 14.352297491708658,
+          "lon": -14.468797689196338
+        }
+      },
+      "inferred": {
+        "geojson_path": "c:\\Users\\worbo\\Documents\\TUM_Courses\\Winter_24-25\\Python\\satellite\\data\\Results\\DashboardData\\2019_inferred.geojson",
+        "center": {
+          "lat": 14.352297491708658,
+          "lon": -14.468797689196338
+        }
+      }
+    },
+    "2023": {
+      "original": {
+        "geojson_path": "c:\\Users\\worbo\\Documents\\TUM_Courses\\Winter_24-25\\Python\\satellite\\data\\Results\\DashboardData\\2023_original.geojson",
+        "center": {
+          "lat": 14.352297491708658,
+          "lon": -14.468797689196338
+        }
+      },
+      "inferred": {
+        "geojson_path": "c:\\Users\\worbo\\Documents\\TUM_Courses\\Winter_24-25\\Python\\satellite\\data\\Results\\DashboardData\\2023_inferred.geojson",
+        "center": {
+          "lat": 14.352297491708658,
+          "lon": -14.468797689196338
+        }
+      }
+    },
+    "2024": {
+      "original": null,
+      "inferred": {
+        "geojson_path": "c:\\Users\\worbo\\Documents\\TUM_Courses\\Winter_24-25\\Python\\satellite\\data\\Results\\DashboardData\\2024_inferred.geojson",
+        "center": {
+          "lat": 14.352297491708658,
+          "lon": -14.468797689196338
+        }
+      }
+    }
+  },
+  "boundary_path": "c:\\Users\\worbo\\Documents\\TUM_Courses\\Winter_24-25\\Python\\satellite\\data\\Results\\DashboardData\\senegal_boundary.geojson"
+}
