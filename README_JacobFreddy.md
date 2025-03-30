@@ -29,8 +29,7 @@ The Wealth Mapping tool combines household survey data with GPS coordinates to c
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/username/WealthMapping.git
-cd WealthMapping
+git clone https://gitlab.lrz.de/hailan.wang/satellite.git && cd satellite/WealthMapping
 ```
 
 2. Install dependencies:
@@ -66,7 +65,7 @@ data/
 
 ## Configuration
 
-The tool is configured using a YAML file (`<span class="EditorTheme__textCode">config.yaml</span>`). Key configuration parameters include:
+The tool is configured using a YAML file (`config.yaml`). Key configuration parameters include:
 
 * Country and year specifications
 * Coordinate reference systems
@@ -155,7 +154,7 @@ WealthMapping/
 
 ## Contact
 
-For questions or support, please open an issue on the GitHub repository.
+For questions or support, please open an issue on the GitLab repository.
 
 # WealthIndex
 
@@ -200,8 +199,7 @@ The WealthIndex tool processes household survey data to create standardized weal
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/username/WealthIndex.git
-cd WealthIndex
+git clone https://gitlab.lrz.de/hailan.wang/satellite.git && cd satellite/WealthIndex
 ```
 
 2. Install dependencies:
@@ -235,7 +233,7 @@ data/
 
 ## Configuration
 
-The tool is configured using a YAML file (`<span class="EditorTheme__textCode">config.yaml</span>`). Key configuration parameters include:
+The tool is configured using a YAML file (`config.yaml`). Key configuration parameters include:
 
 * Country and year specifications
 * Columns to include in analysis
@@ -323,7 +321,7 @@ The tool weights FAMD components based on their correlation with standard wealth
 
 ## Contact
 
-For questions or support, please open an issue on the GitHub repository.
+For questions or support, please open an issue on the GitLab repository.
 
 # Visualization
 
@@ -474,8 +472,7 @@ The SatelliteImages toolkit orchestrates the end-to-end process of generating st
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/username/SatelliteImages.git
-cd SatelliteImages
+git clone https://gitlab.lrz.de/hailan.wang/satellite.git && cd satellite/SatelliteImages
 ```
 
 2. Install dependencies:
@@ -602,7 +599,7 @@ Optimized memory usage through:
 
 ## Contact
 
-For questions or support, please open an issue on the GitHub repository.
+For questions or support, please open an issue on the GitLab repository.
 
 # LabellingTests
 
@@ -643,8 +640,7 @@ This toolkit analyzes how different spatial coverage thresholds affect the quali
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/username/LabellingTests.git
-cd LabellingTests
+git clone https://gitlab.lrz.de/hailan.wang/satellite.git && cd satellite/LabellingTests
 ```
 
 2. Install dependencies:
@@ -759,7 +755,7 @@ Uses Queen contiguity for spatial weight matrix construction, considering all ne
 
 ## Contact
 
-For questions or support, please open an issue on the GitHub repository.
+For questions or support, please open an issue on the GitLab repository.
 
 # LabelImagery
 
@@ -800,8 +796,7 @@ The LabelImagery toolkit generates labeled grid cells by calculating the overlap
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/username/LabelImagery.git
-cd LabelImagery
+git clone https://gitlab.lrz.de/hailan.wang/satellite.git && cd satellite/LabelImagery
 ```
 
 2. Install dependencies:
@@ -924,9 +919,9 @@ Each output file contains:
 
 ## Contact
 
-For questions or support, please open an issue on the GitHub repository.
+For questions or support, please open an issue on the GitLab repository.
 
-# Wealth Index Dashboard
+# Dashboard
 
 An interactive web-based dashboard for visualizing wealth index data across different years and data types. This application provides geospatial mapping, statistical analysis, and time series visualization of wealth distribution in Senegal.
 
@@ -993,8 +988,7 @@ The dashboard provides an intuitive interface for data exploration:
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/username/wealth-index-dashboard.git
-cd wealth-index-dashboard
+git clone https://gitlab.lrz.de/hailan.wang/satellite.git && cd satellite/Dashboard
 ```
 
 2. Install dependencies:
@@ -1061,9 +1055,7 @@ After launching the application, a browser window will automatically open to the
 
 ## Contact
 
-For questions or support, please open an issue on the GitHub repository.
-
-
+For questions or support, please open an issue on the GitLab repository.
 
 # Regressions
 
@@ -1089,8 +1081,7 @@ This Python script performs linear regression analysis on geospatial data files 
 1. Clone the repository
 
 ```bash
-git clone https://github.com/username/Regressions.git
-cd Regressions
+git clone https://gitlab.lrz.de/hailan.wang/satellite.git && cd satellite/Regressions
 ```
 
 2. Install dependencies
