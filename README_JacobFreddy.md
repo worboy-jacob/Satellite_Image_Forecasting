@@ -1155,3 +1155,25 @@ This will:
    - composite_original_wealth_maps.png
    - composite_inferred_wealth_maps.png
    - Grid layout showing multi-year comparison## Troubleshooting
+
+# Training The Model
+
+The jupyter notebook `cnn_training_tuning.ipynb` is used for training the deep learning model for wealth index prediction. It contains the training and hyperparameter tuning logic for the deep learning model. This notebook walks through:
+- Dataset loading and preprocessing
+- CNN architecture definition
+- Model training with validation
+- Hyperparameter tuning (e.g., learning rate, batch size)
+- Saving the best model
+- Visualizing training history (loss, accuracy)
+
+Further information on the specific usage and steps is given in the notebook itself.
+
+# Inference
+
+The jupyter notebook `cnn_inference.ipynb` provides a streamlined way to load a trained CNN model and perform inference on new data. This includes:
+- Loading the saved model
+- Preprocessing test or input data
+- Performing predictions
+- (Optional) Visualizing results
+
+Further information on the specific usage and steps is given in the notebook itself.
