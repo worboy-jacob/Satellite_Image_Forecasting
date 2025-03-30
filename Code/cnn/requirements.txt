@@ -1,0 +1,13 @@
+geopandas
+ipywidgets
+matplotlib
+numpy
+pandas
+scikit_learn
+seaborn
+torch
+torchvision
+tqdm
+jupyter
+ipykernel
+nbformat

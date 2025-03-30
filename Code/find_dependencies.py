@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-Dependencies and Setup.py Generator using pipreqs
+Dependencies and Setup.py Generator
 
-This script analyzes the current codebase structure, identifies dependencies using pipreqs,
-and generates appropriate setup.py and requirements.txt files.
+This script analyzes Python files and Jupyter notebooks in a project,
+identifies dependencies, and generates setup.py and requirements.txt files.
 """
 
 import os
 import sys
+import json
+import tempfile
 from pathlib import Path
 import subprocess
+import shutil
 
 
 def exit_with_error(message):
@@ -67,12 +70,25 @@ def scan_directory_structure():
             print("Warning: No config directory found")
             config_dir = None
 
+    # Find notebooks
+    notebook_files = list(current_dir.glob("**/*.ipynb"))
+    # Filter out checkpoint files
+    notebook_files = [
+        nb for nb in notebook_files if ".ipynb_checkpoints" not in str(nb)
+    ]
+
+    if notebook_files:
+        print(f"Found {len(notebook_files)} Jupyter notebook files")
+    else:
+        print("No Jupyter notebook files found")
+
     return {
         "project_name": project_name,
         "current_dir": current_dir,
         "src_dir": src_dir,
         "main_file": main_file,
         "config_dir": config_dir,
+        "notebook_files": notebook_files,
     }
 
 
@@ -86,8 +102,6 @@ def ensure_pipreqs_installed():
     except ImportError:
         print("Installing pipreqs...")
         try:
-            import subprocess
-
             result = subprocess.run(
                 [sys.executable, "-m", "pip", "install", "pipreqs"],
                 check=True,
@@ -105,86 +119,192 @@ def ensure_pipreqs_installed():
             return False
 
 
-def find_dependencies_with_pipreqs(project_dir):
+def convert_notebook_to_python(notebook_path, output_dir):
     """
-    Use pipreqs to analyze imports and generate requirements.
+    Convert a Jupyter notebook to a Python file.
+
+    Args:
+        notebook_path: Path to the notebook file
+        output_dir: Directory to save the Python file
+
+    Returns:
+        Path to the generated Python file or None if conversion failed
+    """
+    try:
+        # Read the notebook
+        with open(notebook_path, "r", encoding="utf-8") as f:
+            notebook_content = json.load(f)
+
+        # Create Python file path
+        nb_name = os.path.basename(notebook_path).replace(".ipynb", ".py")
+        py_file_path = os.path.join(output_dir, nb_name)
+
+        # Extract code cells and write to Python file
+        with open(py_file_path, "w", encoding="utf-8") as f:
+            f.write(f"# Converted from notebook: {notebook_path}\n\n")
+
+            for cell in notebook_content.get("cells", []):
+                if cell.get("cell_type") == "code":
+                    # Join cell source lines
+                    source = "".join(cell.get("source", []))
+                    if source.strip():
+                        f.write(source)
+                        # Ensure there's a newline at the end
+                        if not source.endswith("\n"):
+                            f.write("\n")
+                        f.write("\n")
+
+        return py_file_path
+
+    except Exception as e:
+        print(f"Warning: Failed to convert notebook {notebook_path}: {e}")
+        return None
+
+
+def find_dependencies(project_dir, notebook_files=None):
+    """
+    Find all dependencies from Python files and Jupyter notebooks.
 
     Args:
         project_dir: Path to the project directory
+        notebook_files: List of notebook files
 
     Returns:
-        List of dependency names found
+        List of unique dependency names
     """
-    import subprocess
-    import tempfile
-
-    print(f"Analyzing dependencies in {project_dir} using pipreqs...")
-
-    # Create a temporary file to store the requirements
-    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as temp_file:
-        temp_path = temp_file.name
+    # Create a temporary directory for converted notebooks
+    temp_dir = None
+    converted_files = []
 
     try:
-        # Run pipreqs to generate requirements file in the temp location
+        # Process notebooks if any exist
+        if notebook_files:
+            print(f"Converting {len(notebook_files)} notebooks to Python files...")
+            temp_dir = tempfile.mkdtemp()
+
+            for notebook in notebook_files:
+                py_file = convert_notebook_to_python(notebook, temp_dir)
+                if py_file:
+                    converted_files.append(py_file)
+
+            print(f"✓ Converted {len(converted_files)} notebooks to Python files")
+
+        # Create a temporary file to store the requirements
+        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as temp_file:
+            req_path = temp_file.name
+
+        # Run pipreqs on the project directory
+        print(f"Analyzing Python dependencies in {project_dir}...")
         cmd = [
             sys.executable,
             "-m",
             "pipreqs.pipreqs",
             str(project_dir),
             "--savepath",
-            temp_path,
+            req_path,
             "--force",
         ]
 
         result = subprocess.run(cmd, check=True, capture_output=True, text=True)
 
-        # Read the generated requirements file
-        with open(temp_path, "r") as f:
+        # Read requirements from Python files
+        with open(req_path, "r") as f:
             requirements = [
                 line.strip().split("==")[0]  # Remove version specifiers
                 for line in f.readlines()
                 if line.strip() and not line.startswith("#")
             ]
 
-        # Exclude pipreqs itself and normalize package names
-        excluded_packages = ["pipreqs", "docopt"]  # docopt is a dependency of pipreqs
-        normalized_requirements = []
+        print(f"✓ Found {len(requirements)} dependencies from Python files")
 
-        for req in requirements:
-            # Normalize case (e.g., pyyaml vs PyYAML)
-            req_lower = req.lower()
+        # If we have converted notebooks, run pipreqs on the temp directory too
+        if temp_dir and converted_files:
+            notebook_req_path = os.path.join(temp_dir, "notebook_requirements.txt")
+
+            cmd = [
+                sys.executable,
+                "-m",
+                "pipreqs.pipreqs",
+                temp_dir,
+                "--savepath",
+                notebook_req_path,
+                "--force",
+            ]
+
+            try:
+                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+                # Read requirements from notebooks
+                with open(notebook_req_path, "r") as f:
+                    notebook_requirements = [
+                        line.strip().split("==")[0]  # Remove version specifiers
+                        for line in f.readlines()
+                        if line.strip() and not line.startswith("#")
+                    ]
+
+                print(
+                    f"✓ Found {len(notebook_requirements)} dependencies from notebooks"
+                )
+                requirements.extend(notebook_requirements)
+
+            except subprocess.CalledProcessError as e:
+                print(f"Warning: Error analyzing notebook dependencies: {e}")
+                print(f"Command output: {e.stdout}\n{e.stderr}")
+            except Exception as e:
+                print(f"Warning: Unexpected error running pipreqs on notebooks: {e}")
+
+        # Normalize and deduplicate dependencies
+        excluded_packages = ["pipreqs", "docopt"]
+        normalized_deps = []
+
+        for dep in requirements:
+            # Normalize case
+            dep_lower = dep.lower()
 
             # Skip excluded packages
-            if req_lower in [p.lower() for p in excluded_packages]:
+            if dep_lower in [p.lower() for p in excluded_packages]:
                 continue
 
-            # Handle PyYAML duplication (pyyaml vs. PyYAML)
-            if req_lower == "pyyaml" and any(
-                r.lower() == "pyyaml" for r in normalized_requirements
-            ):
+            # Skip if already in the normalized list (case-insensitive)
+            if any(r.lower() == dep_lower for r in normalized_deps):
                 continue
 
-            normalized_requirements.append(req)
+            normalized_deps.append(dep)
 
-        print(f"✓ pipreqs found {len(normalized_requirements)} dependencies:")
-        if normalized_requirements:
-            print(", ".join(normalized_requirements))
+        # Add notebook-specific dependencies if notebooks are present
+        if notebook_files:
+            notebook_specific_deps = ["jupyter", "ipykernel", "nbformat"]
+            for dep in notebook_specific_deps:
+                if dep.lower() not in [d.lower() for d in normalized_deps]:
+                    normalized_deps.append(dep)
 
-        return normalized_requirements
+        print(f"✓ Found {len(normalized_deps)} total unique dependencies")
+        if normalized_deps:
+            print(", ".join(normalized_deps))
+
+        return normalized_deps
 
     except subprocess.CalledProcessError as e:
         print(f"ERROR: pipreqs failed: {e}")
         print(f"Command output: {e.stdout}\n{e.stderr}")
         return []
     except Exception as e:
-        print(f"ERROR: Unexpected error running pipreqs: {e}")
+        print(f"ERROR: Unexpected error finding dependencies: {e}")
         return []
     finally:
-        # Clean up the temporary file
+        # Clean up temporary files
         try:
-            os.unlink(temp_path)
+            if os.path.exists(req_path):
+                os.unlink(req_path)
         except:
             pass
+
+        # Clean up temporary directory
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except:
+                print(f"Warning: Failed to clean up temporary directory: {temp_dir}")
 
 
 def find_yaml_files(config_dir):
@@ -271,6 +391,7 @@ def generate_setup_py(project_info, dependencies, yaml_files):
     project_name = project_info["project_name"]
     src_dir = project_info["src_dir"]
     current_dir = project_info["current_dir"]
+    notebook_files = project_info.get("notebook_files", [])
 
     # Python version
     python_version = f">={sys.version_info.major}.{sys.version_info.minor}"
@@ -278,10 +399,29 @@ def generate_setup_py(project_info, dependencies, yaml_files):
     # Format dependencies for setup.py
     deps_str = "[" + ", ".join(f'"{dep}"' for dep in dependencies) + "]"
 
-    # Format YAML files for package_data if any
+    # Format YAML files and notebook files for package_data
+    package_data = {}
+
+    # Add YAML files if any
     if yaml_files:
-        yaml_files_str = [f'"{file}"' for file in yaml_files]
-        package_data_str = f'{{"": [{", ".join(yaml_files_str)}]}}'
+        package_data[""] = yaml_files
+
+    # Add notebook files to package_data if any
+    if notebook_files:
+        notebook_paths = [str(f.relative_to(current_dir)) for f in notebook_files]
+        if "" in package_data:
+            package_data[""].extend(notebook_paths)
+        else:
+            package_data[""] = notebook_paths
+
+    # Format package_data for setup.py
+    if package_data:
+        package_data_items = []
+        for k, v in package_data.items():
+            v_str = "[" + ", ".join(f'"{item}"' for item in v) + "]"
+            package_data_items.append(f'"{k}": {v_str}')
+
+        package_data_str = "{" + ", ".join(package_data_items) + "}"
     else:
         package_data_str = '{"": []}'
 
@@ -298,7 +438,7 @@ def generate_setup_py(project_info, dependencies, yaml_files):
     else:
         # Either a flat structure or a non-standard src location
         rel_src = src_dir.relative_to(current_dir)
-        if str(rel_src) == ".":
+        if str(rel_path := rel_src) == ".":
             # Flat structure
             packages_line = "packages=find_packages()"
             package_dir_line = "# package_dir not needed for flat structure"
@@ -325,6 +465,7 @@ setup(
         ],
     }},
     python_requires="{python_version}",
+    include_package_data=True,
 )
 """
 
@@ -374,6 +515,7 @@ def create_init_files(directory):
         "node_modules",
         "config",
         "logs",
+        ".ipynb_checkpoints",  # Exclude Jupyter checkpoints
     }
 
     created_count = 0
@@ -387,7 +529,7 @@ def create_init_files(directory):
         # Check if directory contains Python files
         has_py_files = any(f.endswith(".py") for f in files)
 
-        if has_py_files:
+        if has_py_files:  # Only create __init__.py for Python files
             init_file_path = os.path.join(root, "__init__.py")
 
             if os.path.exists(init_file_path):
@@ -438,11 +580,13 @@ def main():
                 "Failed to install pipreqs. Cannot continue with dependency detection."
             )
 
-        # Find dependencies
+        # Find all dependencies
         print("\n" + "=" * 60)
         print("DETECTING DEPENDENCIES")
         print("=" * 60)
-        dependencies = find_dependencies_with_pipreqs(project_info["current_dir"])
+        dependencies = find_dependencies(
+            project_info["current_dir"], project_info.get("notebook_files", [])
+        )
 
         if not dependencies:
             print("Warning: No dependencies found. The requirements will be empty.")
@@ -461,6 +605,10 @@ def main():
         print("\n📋 NEXT STEPS:")
         print("1. Review the generated setup.py and requirements.txt files")
         print("2. Run 'pip install -e .' to install the package in development mode")
+        if project_info.get("notebook_files"):
+            print(
+                "3. For Jupyter notebooks, run 'python -m ipykernel install --user --name=your-env-name'"
+            )
         print("=" * 60)
 
     except KeyboardInterrupt:
