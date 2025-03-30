@@ -1062,3 +1062,105 @@ After launching the application, a browser window will automatically open to the
 ## Contact
 
 For questions or support, please open an issue on the GitHub repository.
+
+
+
+# Regressions
+
+This Python script performs linear regression analysis on geospatial data files to predict wealth indices. The script processes files, performs per-year and combined regressions, and generates various plots and predictions.
+
+## Features
+
+- **Spatial Data Processing**: Handles GeoPackage (.gpkg) files containing wealth index data
+- **Dynamic Year Detection**: Automatically detects available years from filenames
+- **Dual Data Sources**: Supports both original survey data and satellite-inferred predictions
+- **Statistical Summary**: Calculates median, mean, min/max, and standard deviation for each dataset
+- **Composite Visualization**: Creates combined overview images showing temporal comparisons
+
+## Installation
+
+### Prerequisites
+
+* Python 3.8+
+* Required packages (listed in requirements.txt)
+
+### Setup
+
+1. Clone the repository
+
+```bash
+git clone https://github.com/username/Regressions.git
+cd Regressions
+```
+
+2. Install dependencies
+
+```bash
+pip install -r requirements.txt
+# Or using conda:
+conda install --file requirements.txt
+```
+
+## Directory Structure
+
+The tool expects a specific data structure:
+
+```bash
+data/
+├── Results/
+│   ├── LabelledGrids/         # Input GeoPackage files
+│   │   ├── Senegal_YYYY_wealthindex_labelled.gpkg      # Original survey data
+│   │   └── Senegal_YYYY_wealthindex_labelled_inferred.gpkg  # Satellite predictions
+│   └── WealthMaps/            # Output PNG images
+└── ShapeFiles/
+    └── Senegal/               # Boundary shapefile
+```
+
+## Configuration
+
+1. Input Data Preparation:
+
+   - Place GeoPackage files in data/Results/LabelledGrids/
+   - Filename format: Senegal_YYYY_wealthindex_labelled[_inferred].gpkg
+
+     - YYYY: 4-digit year
+     - _inferred: Marks satellite-predicted data
+2. Boundary Data:
+
+   - Ensure Senegal boundary shapefile exists in data/ShapeFiles/Senegal/
+   - Script uses first found .shp file in this directory
+
+   ### Technical Settings
+
+
+   * ****Coordinate System**** : UTM Zone 28N (EPSG:32628) for all spatial operations
+   * ****Color Mapping**** : Diverging RdBu_r colormap (blue = low wealth, red = high wealth)
+   * ****Required Columns**** : Input files must contain a `weighted_wealth` column
+
+## Usage
+
+Run the wealth mapping script:
+
+```bash
+python path/to/wealth_mapping_script.py
+```
+
+This will:
+
+1. Load and process all available GeoPackage files
+2. Perform regression analysis on the data
+3. Generate individual wealth maps for each year and data type
+4. Create composite images for temporal comparison
+5. Save all outputs to the specified directories
+
+## Outputs
+
+1. Individual Maps:
+
+   - Saved as PNG in data/Results/WealthMaps/
+   - Filename format: senegal_wealth_YYYY_[original|inferred].png
+2. Composite Images:
+
+   - composite_original_wealth_maps.png
+   - composite_inferred_wealth_maps.png
+   - Grid layout showing multi-year comparison## Troubleshooting
