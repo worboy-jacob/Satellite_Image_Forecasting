@@ -24,14 +24,12 @@ This Python script performs linear regression analysis on geospatial data files 
 1. Clone the repository
 
 ```bash
-Copy
 git clone [your-repository-url]
 cd [repository-directory]
 ```
 2. Install dependencies
 
 ```bash
-Copy
 pip install -r requirements.txt
 # Or using conda:
 conda install --file requirements.txt
@@ -40,7 +38,6 @@ conda install --file requirements.txt
 ## Directory Structure
 
 ```bash
-Copy
 data/
 ├── Results/
 │   ├── LabelledGrids/         # Input GeoPackage files
@@ -67,7 +64,6 @@ data/
 
 ## Usage
 ```bash
-Copy
 python path/to/wealth_mapping_script.py
 ```
 
