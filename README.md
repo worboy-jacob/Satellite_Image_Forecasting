@@ -29,7 +29,7 @@ The Wealth Mapping tool combines household survey data with GPS coordinates to c
 1. Clone the repository:
 
 ```bash
-git clone https://gitlab.lrz.de/hailan.wang/satellite.git && cd satellite/WealthMapping
+git clone https://github.com/worboy-jacob/Satellite_Image_Forecasting && cd satellite/WealthMapping
 ```
 
 2. Install dependencies:
@@ -154,7 +154,7 @@ WealthMapping/
 
 ## Contact
 
-For questions or support, please open an issue on the GitLab repository.
+For questions or support, please open an issue on the GitHub repository.
 
 # WealthIndex
 
@@ -199,7 +199,7 @@ The WealthIndex tool processes household survey data to create standardized weal
 1. Clone the repository:
 
 ```bash
-git clone https://gitlab.lrz.de/hailan.wang/satellite.git && cd satellite/WealthIndex
+git clone https://github.com/worboy-jacob/Satellite_Image_Forecasting && cd satellite/WealthIndex
 ```
 
 2. Install dependencies:
@@ -321,7 +321,7 @@ The tool weights FAMD components based on their correlation with standard wealth
 
 ## Contact
 
-For questions or support, please open an issue on the GitLab repository.
+For questions or support, please open an issue on the GitHub repository.
 
 # Visualization
 
@@ -472,7 +472,7 @@ The SatelliteImages toolkit orchestrates the end-to-end process of generating st
 1. Clone the repository:
 
 ```bash
-git clone https://gitlab.lrz.de/hailan.wang/satellite.git && cd satellite/SatelliteImages
+git clone https://github.com/worboy-jacob/Satellite_Image_Forecasting && cd satellite/SatelliteImages
 ```
 
 2. Install dependencies:
@@ -599,7 +599,7 @@ Optimized memory usage through:
 
 ## Contact
 
-For questions or support, please open an issue on the GitLab repository.
+For questions or support, please open an issue on the GitHub repository.
 
 # LabellingTests
 
@@ -640,7 +640,7 @@ This toolkit analyzes how different spatial coverage thresholds affect the quali
 1. Clone the repository:
 
 ```bash
-git clone https://gitlab.lrz.de/hailan.wang/satellite.git && cd satellite/LabellingTests
+git clone https://github.com/worboy-jacob/Satellite_Image_Forecasting && cd satellite/LabellingTests
 ```
 
 2. Install dependencies:
@@ -755,7 +755,7 @@ Uses Queen contiguity for spatial weight matrix construction, considering all ne
 
 ## Contact
 
-For questions or support, please open an issue on the GitLab repository.
+For questions or support, please open an issue on the GitHub repository.
 
 # LabelImagery
 
@@ -796,7 +796,7 @@ The LabelImagery toolkit generates labeled grid cells by calculating the overlap
 1. Clone the repository:
 
 ```bash
-git clone https://gitlab.lrz.de/hailan.wang/satellite.git && cd satellite/LabelImagery
+git clone https://github.com/worboy-jacob/Satellite_Image_Forecasting && cd satellite/LabelImagery
 ```
 
 2. Install dependencies:
@@ -919,7 +919,7 @@ Each output file contains:
 
 ## Contact
 
-For questions or support, please open an issue on the GitLab repository.
+For questions or support, please open an issue on the GitHub repository.
 
 # Dashboard
 
@@ -988,7 +988,7 @@ The dashboard provides an intuitive interface for data exploration:
 1. Clone the repository:
 
 ```bash
-git clone https://gitlab.lrz.de/hailan.wang/satellite.git && cd satellite/Dashboard
+git clone https://github.com/worboy-jacob/Satellite_Image_Forecasting && cd satellite/Dashboard
 ```
 
 2. Install dependencies:
@@ -1055,7 +1055,7 @@ After launching the application, a browser window will automatically open to the
 
 ## Contact
 
-For questions or support, please open an issue on the GitLab repository.
+For questions or support, please open an issue on the GitHub repository.
 
 # Regressions
 
@@ -1081,7 +1081,7 @@ This Python script performs linear regression analysis on geospatial data files 
 1. Clone the repository
 
 ```bash
-git clone https://gitlab.lrz.de/hailan.wang/satellite.git && cd satellite/Regressions
+git clone https://github.com/worboy-jacob/Satellite_Image_Forecasting && cd satellite/Regressions
 ```
 
 2. Install dependencies
